@@ -1,0 +1,10 @@
+build/bin
+node_modules
+client/frontend/dist
+server/frontend/dist
+client/frontend/wailsjs/go/
+thingue-launcher
+.idea
+config.yaml
+config.db
+pre-install-pacakges/

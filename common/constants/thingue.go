@@ -1,0 +1,29 @@
+package constants
+
+const DEFAULT_THINGUE_LAUNCH_ARGUMENTS = `
+-AudioMixer
+-RenderOffScreen
+-ForceRes
+-ResX=1920
+-ResY=1080
+-PixelStreamingEncoderRateControl=VBR
+-PixelStreamingEncoderMinQP=17
+-PixelStreamingEncoderMaxQP=35
+-PixelStreamingDegradationPreference=MAINTAIN_FRAMERATE
+-PixelStreamingEncoderTargetBitrate=-1
+-PixelStreamingEncoderMaxBitrate=6000000
+-PixelStreamingWebRTCStartBitrate=1000000
+-PixelStreamingWebRTCMinBitrate=1000000
+-PixelStreamingWebRTCMaxBitrate=6000000
+-PixelStreamingWebRTCDisableReceiveAudio=1
+-PixelStreamingWebRTCDisableAudioSync=1
+-PixelStreamingWebRTCDisableTransmitAudio=1
+-PixelStreamingEncoderMultipass=FULL
+-PixelStreamingWebRTCFps=60
+-PixelStreamingHEVCEncoderPreset=1
+-NVENC.KeyframeInterval=150
+-PixelStreaming.Encoder.Preset=LOW_QUALITY
+-NVENC.IntraRefreshPeriodFrames=0
+-NVENC.IntraRefreshCountFrames=0
+-PixelStreamingWebRTCLowQpThreshold=17
+-PixelStreamingWebRTCHighQpThreshold=35`

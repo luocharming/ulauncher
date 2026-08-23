@@ -1,0 +1,29 @@
+{
+  "name": "my-vue-app",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build --base=./",
+    "preview": "vite preview",
+    "link": "npm link ../../../thing.ue.frontend/pixelstreaming/library ../../../thing.ue.frontend/pixelstreaming/ui-library"
+  },
+  "dependencies": {
+    "@quasar/extras": "^1.16.5",
+    "@thingue/lib-pixelstreamingfrontend": "^0.1.2",
+    "@thingue/lib-pixelstreamingfrontend-ui": "^0.1.2",
+    "axios": "^1.4.0",
+    "mitt": "^3.0.1",
+    "monaco-editor": "^0.41.0",
+    "quasar": "^2.12.4",
+    "uuid": "^9.0.0",
+    "vue": "^3.3.4"
+  },
+  "devDependencies": {
+    "@quasar/vite-plugin": "^1.4.1",
+    "@vitejs/plugin-vue": "^4.2.3",
+    "sass": "^1.32.12",
+    "vite": "^4.4.5",
+    "vite-plugin-monaco-editor": "^1.1.0"
+  }
+}

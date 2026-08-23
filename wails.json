@@ -1,0 +1,21 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "ThingUELauncher",
+  "outputfilename": "thingue-launcher",
+  "frontend:dir": "client/frontend",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "info": {
+    "companyName": "",
+    "productName": "ThingUE启动程序",
+    "productVersion": "0.0.10",
+    "copyright": "",
+    "comments": "ThingUE启动程序"
+  },
+  "author": {
+    "name": "杨晋升",
+    "email": "yangjinsheng@uino.com"
+  }
+}
