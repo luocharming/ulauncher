@@ -103,14 +103,19 @@ func (s *ticketService) Consume(ticket, sid string) error {
 	return nil
 }
 
-func (s *ticketService) GetTicketById(sid string) (string, error) {
+func (s *ticketService) GetTicketById(sid string, clientIP string) (string, error) {
 	var instance model.ServerInstance
 	err := global.SERVER_DB.Where("s_id = ?", sid).First(&instance).Error
 	if err != nil {
 		return "", err
 	}
+	// 与 TicketSelect2 的 SID 直选一致：白名单准入优先于容量校验，避免绕过白名单直接取票
+	if !whitelistAllows(&instance, clientIP) {
+		logger.Zap.Warnf("getTicketById 被白名单拒绝 SID=%s IP=%s 白名单=%v", sid, clientIP, instance.Whitelist)
+		return "", errors.New("当前IP不在该实例白名单内")
+	}
 	// 与 TicketSelect2 同一预留机制，容量校验一致
-	return s.Reserve(sid, "", instance.InstanceType == 0)
+	return s.Reserve(sid, clientIP, instance.InstanceType == 0)
 }
 
 func (s *ticketService) GetSidByTicket(ticket string) (string, error) {
@@ -286,10 +291,13 @@ func (s *ticketService) TicketSelect2(selectCond request.SelectorCond) (response
 	if len(readyInstances) == 0 {
 		return ticket, errors.New("实例未启动且未开启自动启停")
 	}
-	// 6) SID 直选：跳过选择策略，但仍做容量校验与预留
+	// 6) SID 直选：跳过选择策略，但仍做白名单准入（player.html?sid= 直连不能绕过白名单）与容量校验、预留
 	if selectCond.SID != "" {
 		for _, instance := range findInstances {
 			if instance.SID == selectCond.SID {
+				if !whitelistAllows(instance, selectCond.ClientIP) {
+					return ticket, errors.New("当前IP不在该实例白名单内")
+				}
 				ticketId, err := s.Reserve(instance.SID, selectCond.ClientIP, isSharedReq)
 				if err != nil {
 					return ticket, err
@@ -302,7 +310,9 @@ func (s *ticketService) TicketSelect2(selectCond request.SelectorCond) (response
 		return ticket, errors.New(fmt.Sprintf("未查找到sid:%s的实例", selectCond.SID))
 	}
 	// 7) 类型池过滤（nil 与 true 都进共享池；false 进独占池；池间不交叉回退）
+	//    + 白名单准入过滤：配置了白名单但当前 IP 未命中的实例，两段都不参与（严格准入）
 	var candidates []*model.ServerInstance
+	deniedByWhitelist := 0
 	for _, instance := range readyInstances {
 		if isSharedReq && instance.InstanceType != 0 {
 			continue
@@ -310,9 +320,16 @@ func (s *ticketService) TicketSelect2(selectCond request.SelectorCond) (response
 		if !isSharedReq && instance.InstanceType != 1 {
 			continue
 		}
+		if !whitelistAllows(instance, selectCond.ClientIP) {
+			deniedByWhitelist++
+			continue
+		}
 		candidates = append(candidates, instance)
 	}
 	if len(candidates) == 0 {
+		if deniedByWhitelist > 0 {
+			return ticket, errors.New("当前IP不在可用实例的白名单内")
+		}
 		if isSharedReq {
 			return ticket, errors.New("没有可用的共享实例")
 		}
@@ -442,16 +459,21 @@ func (s *ticketService) selectWithScene(candidates []*model.ServerInstance, cond
 }
 
 // whitelistHit 白名单命中判断：空白名单视为不命中（归第二段"无白名单段"）；
-// 配置了白名单且包含客户端 IP（net.ParseIP 规范化后比较）才命中第一段。
+// 配置了白名单且命中其中一条规则（精确 IP 或 IPv4 通配网段 192.168.1.*）才命中第一段。
 func whitelistHit(instance *model.ServerInstance, clientIP string) bool {
 	if len(instance.Whitelist) == 0 {
 		return false
 	}
-	normalized := util.NormalizeIP(clientIP)
-	if normalized == "" {
-		return false
+	return util.MatchIPRules(instance.Whitelist, clientIP)
+}
+
+// whitelistAllows 白名单准入判断（严格语义）：未配置白名单对所有 IP 开放；
+// 配置了白名单则只有命中的 IP 可以分配到该实例，未命中的一律不参与分配，也不能通过 SID 直选绕过。
+func whitelistAllows(instance *model.ServerInstance, clientIP string) bool {
+	if len(instance.Whitelist) == 0 {
+		return true
 	}
-	return util.ContainsString(instance.Whitelist, normalized)
+	return util.MatchIPRules(instance.Whitelist, clientIP)
 }
 
 func (s *ticketService) LoadBundle(sid string, pak string) error {

@@ -73,12 +73,20 @@ func (s *instanceService) UpdateInstanceSettings(req request.UpdateInstanceSetti
 	if req.InstanceType != 0 && req.InstanceType != 1 {
 		return nil, errors.New("实例类型非法")
 	}
-	// 白名单逐个 net.ParseIP 强校验，存储规范化格式（兼容 IPv4/IPv6）
+	// 白名单逐条强校验：精确 IP（IPv4/IPv6）或 IPv4 通配网段（192.168.1.*），存储规范化格式并去重；
+	// 空行（前端新增未填写的行）直接忽略
 	normalized := make(model.StringSlice, 0, len(req.Whitelist))
-	for _, ip := range req.Whitelist {
-		parsed := util.NormalizeIP(strings.TrimSpace(ip))
+	for _, rule := range req.Whitelist {
+		trimmed := strings.TrimSpace(rule)
+		if trimmed == "" {
+			continue
+		}
+		parsed := util.NormalizeIPRule(trimmed)
 		if parsed == "" {
-			return nil, fmt.Errorf("白名单包含非法IP: %s", ip)
+			return nil, fmt.Errorf("白名单包含非法IP或网段: %s", trimmed)
+		}
+		if util.ContainsString(normalized, parsed) {
+			continue
 		}
 		normalized = append(normalized, parsed)
 	}
@@ -90,13 +98,10 @@ func (s *instanceService) UpdateInstanceSettings(req request.UpdateInstanceSetti
 	if req.InstanceType == 1 && instance.InstanceType == 0 && instance.PlayerCount > 1 {
 		return nil, errors.New("当前连接数超过1，请先断开后再切换为独占")
 	}
-	// 写 SERVER_DB
-	global.SERVER_DB.Model(&model.ServerInstance{}).Where("s_id = ?", req.SID).Updates(map[string]any{
-		"instance_type":    req.InstanceType,
-		"whitelist":        normalized,
-		"max_player_count": req.MaxPlayerCount,
-	})
-	// upsert STORAGE_DB（单行 last-write-wins），供 register 时合并恢复
+	// 先 upsert STORAGE_DB：持久化行才是权威来源（SERVER_DB 是内存库，register 时按 SID 合并回来），
+	// 写失败必须直接报错，否则管理端显示"已保存"、客户端一重连设置就被旧值覆盖。
+	// 冲突目标必须显式指定 s_id：GORM 默认按主键 id 生成 ON CONFLICT，而新建行 id 为零值永不冲突，
+	// 实际会撞上 s_id 唯一索引 → 同一实例的第二次及以后保存全部失败。
 	settings := model.InstanceSettings{
 		SID:            req.SID,
 		InstanceType:   req.InstanceType,
@@ -104,7 +109,26 @@ func (s *instanceService) UpdateInstanceSettings(req request.UpdateInstanceSetti
 		MaxPlayerCount: req.MaxPlayerCount,
 		LastSeenAt:     time.Now(),
 	}
-	global.STORAGE_DB.Clauses(clause.OnConflict{UpdateAll: true}).Create(&settings)
+	if err := global.STORAGE_DB.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "s_id"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"instance_type", "whitelist", "max_player_count", "last_seen_at", "updated_at",
+		}),
+	}).Create(&settings).Error; err != nil {
+		logger.Zap.Errorf("实例设置持久化失败 SID=%s err=%v", req.SID, err)
+		return nil, errors.New("设置持久化失败，请重试")
+	}
+	// 再写 SERVER_DB（运行时状态，分配逻辑读这里）
+	if err := global.SERVER_DB.Model(&model.ServerInstance{}).Where("s_id = ?", req.SID).Updates(map[string]any{
+		"instance_type":    req.InstanceType,
+		"whitelist":        normalized,
+		"max_player_count": req.MaxPlayerCount,
+	}).Error; err != nil {
+		logger.Zap.Errorf("实例设置写入运行时库失败 SID=%s err=%v", req.SID, err)
+		return nil, errors.New("设置写入失败，请重试")
+	}
+	logger.Zap.Infof("实例设置已保存 SID=%s 类型=%d 白名单=%v 上限=%d",
+		req.SID, req.InstanceType, normalized, req.MaxPlayerCount)
 	provider.AdminConnProvider.BroadcastUpdate()
 	return s.GetInstanceBySid(req.SID), nil
 }

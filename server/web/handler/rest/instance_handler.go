@@ -158,7 +158,7 @@ func (g *InstanceGroup) TicketSelect(c *gin.Context) {
 }
 
 func (g *InstanceGroup) GetTicketById(c *gin.Context) {
-	ticket, err := core.TicketService.GetTicketById(c.Query("sid"))
+	ticket, err := core.TicketService.GetTicketById(c.Query("sid"), c.ClientIP())
 	if err != nil {
 		response.FailWithMessage(err.Error(), c)
 	} else {

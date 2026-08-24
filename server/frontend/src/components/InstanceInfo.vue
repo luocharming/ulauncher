@@ -13,17 +13,16 @@ const config = reactive({
 // 分配设置表单（实例类型/白名单/连接数上限）
 const alloc = reactive({
   instanceType: props.row.instanceType || 0,
-  whitelist: props.row.whitelist ? [...props.row.whitelist] : [],
+  whitelistRows: (props.row.whitelist || []).map(ip => ({value: ip, error: ''})),
   maxPlayerCount: (props.row.maxPlayerCount === undefined || props.row.maxPlayerCount === null) ? -1 : props.row.maxPlayerCount
 });
-const ipInput = ref('');
 const dom = ref();
 const labels = ref([])
 let editor;
 onMounted(() => {
   getLabels(props.row.labels)
   editor = monaco.editor.create(dom.value, {
-    value: props.row.launchArguments.join('\n'),
+    value: (props.row.launchArguments || []).join('\n'),
     language: 'ini',
     lineNumbers: 'off',
     theme: 'vs-dark',
@@ -73,46 +72,86 @@ function getLabels(obj) {
 watch(
     () => props.row.launchArguments,
     async (newValue, oldValue) => {
-      editor.setValue(newValue.join('\n'));
+      editor.setValue((newValue || []).join('\n'));
     }
 );
 
-// 抽屉复用组件实例：切换到其它实例时重新初始化分配设置表单
+// 抽屉复用组件实例：切换到其它实例/行数据刷新（保存后广播）时重新初始化分配设置表单
 watch(
     () => props.row,
     (newRow) => {
       alloc.instanceType = newRow.instanceType || 0;
-      alloc.whitelist = newRow.whitelist ? [...newRow.whitelist] : [];
+      alloc.whitelistRows = (newRow.whitelist || []).map(ip => ({value: ip, error: ''}));
       alloc.maxPlayerCount = (newRow.maxPlayerCount === undefined || newRow.maxPlayerCount === null) ? -1 : newRow.maxPlayerCount;
-      ipInput.value = '';
     }
 );
 
-function isValidIp(ip) {
-  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
-  const ipv6 = /^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$/;
-  if (ipv4.test(ip)) {
-    return ip.split('.').every(n => Number(n) >= 0 && Number(n) <= 255);
+// 精确 IP（IPv4/IPv6）或 IPv4 通配网段（如 192.168.1.*），与后端 util.NormalizeIPRule 校验规则一致
+function isValidIpRule(ip) {
+  const text = (ip || '').trim();
+  if (!text) {
+    return false;
   }
-  return ipv6.test(ip);
+  if (!text.includes('*')) {
+    const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+    const ipv6 = /^([0-9a-fA-F]{0,4}:){2,7}[0-9a-fA-F]{0,4}$/;
+    if (ipv4.test(text)) {
+      return text.split('.').every(n => Number(n) >= 0 && Number(n) <= 255);
+    }
+    return ipv6.test(text);
+  }
+  // 通配网段：必须完整 4 段，每段为 * 或 0-255
+  const parts = text.split('.');
+  if (parts.length !== 4) {
+    return false;
+  }
+  return parts.every(part => part === '*' || (/^\d{1,3}$/.test(part) && Number(part) >= 0 && Number(part) <= 255));
 }
 
-function addIp() {
-  const text = (ipInput.value || '').trim();
-  if (!text) {
-    return;
-  }
-  // 回车/逗号分隔生成
-  for (const part of text.split(/[,，\s]+/).filter(Boolean)) {
-    if (!isValidIp(part)) {
-      Notify.create({type: 'negative', position: 'top', message: `非法IP: ${part}`});
+function addIpRow() {
+  alloc.whitelistRows.push({value: '', error: ''});
+}
+
+function clearWhitelist() {
+  alloc.whitelistRows = [];
+  Notify.create({type: 'info', position: 'top', message: '白名单已清空，点击"保存分配设置"后生效'});
+}
+
+// 收集并校验白名单行；返回 null 表示校验失败（错误信息已写到行内）
+function collectWhitelist() {
+  const values = [];
+  for (let i = 0; i < alloc.whitelistRows.length; i++) {
+    const row = alloc.whitelistRows[i];
+    const text = (row.value || '').trim();
+    row.error = '';
+    if (!text) {
+      continue; // 空白行：忽略（新建未填写的行/误按加号）
+    }
+    if (!isValidIpRule(text)) {
+      row.error = '非法IP或网段';
       continue;
     }
-    if (!alloc.whitelist.includes(part)) {
-      alloc.whitelist.push(part);
+    if (values.includes(text)) {
+      row.error = '与上面的行重复';
+      continue;
     }
+    values.push(text);
   }
-  ipInput.value = '';
+  const errors = [];
+  alloc.whitelistRows.forEach((row, index) => {
+    if (row.error) {
+      errors.push(`第${index + 1}行：${row.error}`);
+    }
+  });
+  if (errors.length > 0) {
+    Notify.create({
+      type: 'negative',
+      position: 'top',
+      message: `白名单校验失败（${errors.join('；')}），请修正后再保存`
+    });
+    return null;
+  }
+  return values;
 }
 
 function saveSettings() {
@@ -120,13 +159,28 @@ function saveSettings() {
     Notify.create({type: 'negative', position: 'top', message: '连接数上限仅支持-1(不限)或>=1'});
     return;
   }
+  const whitelist = collectWhitelist();
+  if (whitelist === null) {
+    return;
+  }
   updateInstanceSettings({
     sid: props.row.sid,
     instanceType: alloc.instanceType,
-    whitelist: alloc.whitelist,
-    maxPlayerCount: alloc.instanceType === 1 ? alloc.maxPlayerCount : alloc.maxPlayerCount
+    whitelist,
+    maxPlayerCount: alloc.instanceType === 0 ? alloc.maxPlayerCount : -1
   }).then((r) => {
-    if (r.code === 200 && r.data && alloc.instanceType === 0
+    if (r.code !== 200 || !r.data) {
+      return;
+    }
+    const instance = r.data.instance;
+    // 保存成功：用服务端返回的权威值回填表单，并同步到行数据（后端会做通配网段规范化/去重，前端与后端保持一致）
+    alloc.instanceType = instance.instanceType;
+    alloc.whitelistRows = (instance.whitelist || []).map(ip => ({value: ip, error: ''}));
+    alloc.maxPlayerCount = instance.maxPlayerCount;
+    props.row.instanceType = instance.instanceType;
+    props.row.whitelist = instance.whitelist;
+    props.row.maxPlayerCount = instance.maxPlayerCount;
+    if (alloc.instanceType === 0
         && r.data.instance.maxPlayerCount > 0
         && r.data.currentPlayerCount > r.data.instance.maxPlayerCount) {
       Notify.create({
@@ -135,6 +189,8 @@ function saveSettings() {
         message: `当前连接数 ${r.data.currentPlayerCount} 已超新上限 ${r.data.instance.maxPlayerCount}，新连接将被拒绝`
       });
     }
+  }).catch(() => {
+    Notify.create({type: 'negative', position: 'top', message: '保存失败，请检查服务端状态后重试'});
   });
 }
 
@@ -143,9 +199,9 @@ function saveSettings() {
   <div class="q-pa-md q-gutter-md">
     <div class="text-h5">实例配置</div>
     <div class="text-subtitle2">实例名称</div>
-    <q-input dense filled v-model="config.name"/>
+    <q-input dense filled v-model="config.name" readonly/>
     <div class="text-subtitle2">可执行文件路径</div>
-    <q-input dense filled v-model="config.execPath"/>
+    <q-input dense filled v-model="config.execPath" readonly/>
     <div class="text-subtitle2">启动参数</div>
     <div class="editor" ref="dom"></div>
     <div class="text-subtitle2">自定义标签</div>
@@ -163,18 +219,27 @@ function saveSettings() {
         ]"
         inline
     />
-    <div class="text-subtitle2">白名单（不配置=所有 IP 可分配）</div>
-    <q-input dense filled v-model="ipInput" @keyup.enter="addIp"
-             placeholder="输入 IP 后回车添加，多个可用逗号分隔"/>
-    <div class="q-pa-none q-mt-sm">
-      <q-chip v-for="(ip, index) in alloc.whitelist" :key="ip" removable
-              @remove="alloc.whitelist.splice(index, 1)">
-        {{ ip }}
-      </q-chip>
+    <div class="text-subtitle2">白名单（不配置=所有 IP 可分配；支持精确 IP 与通配网段，如 192.168.1.*）</div>
+    <div class="q-gutter-y-sm">
+      <div v-for="(row, index) in alloc.whitelistRows" :key="index" class="row items-center q-gutter-sm">
+        <q-input dense filled class="col" v-model="row.value"
+                 :error="!!row.error" :error-message="row.error"
+                 placeholder="192.168.1.* 或 10.0.0.5"
+                 @keyup.enter="index === alloc.whitelistRows.length - 1 ? addIpRow() : null">
+        </q-input>
+        <q-btn dense flat round color="negative" icon="remove_circle_outline"
+               :disable="alloc.whitelistRows.length === 1 && !row.value"
+               @click="alloc.whitelistRows.splice(index, 1)"/>
+      </div>
+    </div>
+    <div class="q-mt-sm row q-gutter-md">
+      <q-btn size="sm" color="primary" icon="add" label="新增IP" @click="addIpRow"/>
+      <q-btn size="sm" color="negative" outline label="一键清空白名单"
+             :disable="alloc.whitelistRows.length === 0" @click="clearWhitelist"/>
     </div>
     <div class="text-subtitle2">连接数上限</div>
     <q-input v-if="alloc.instanceType === 0" dense filled type="number" v-model.number="alloc.maxPlayerCount"
-             hint="-1 表示不限"/>
+             hint="-1 表示不限；白名单外的 IP 将无法分配"/>
     <q-input v-else dense filled readonly model-value="固定 1"/>
     <div class="q-mt-md row q-gutter-md">
       <q-btn color="primary" label="保存分配设置" @click="saveSettings"/>
