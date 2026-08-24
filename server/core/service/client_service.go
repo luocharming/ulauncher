@@ -39,6 +39,29 @@ func (s *clientService) ClientRegister(registerInfo *request.ClientRegisterInfo)
 			sid, _ := uuid.NewUUID()
 			serverInstance.SID = sid.String()
 		}
+		// SID 冲突检测（克隆 config.db 场景）：冲突方换新 SID（获得默认设置）
+		var cnt int64
+		global.SERVER_DB.Model(&model.ServerInstance{}).
+			Where("s_id = ? AND (client_id <> ? OR c_id <> ?)", serverInstance.SID,
+				client.ID, serverInstance.CID).Count(&cnt)
+		if cnt > 0 {
+			sid, _ := uuid.NewUUID()
+			serverInstance.SID = sid.String()
+		}
+		// 合并持久化设置（类型/白名单/连接数上限）；无持久化行时归一化为默认值
+		var settings model.InstanceSettings
+		if err := global.STORAGE_DB.Where("s_id = ?", serverInstance.SID).
+			First(&settings).Error; err == nil {
+			serverInstance.InstanceType = settings.InstanceType
+			serverInstance.Whitelist = settings.Whitelist
+			serverInstance.MaxPlayerCount = settings.MaxPlayerCount
+			settings.LastSeenAt = time.Now()
+			global.STORAGE_DB.Save(&settings)
+		} else {
+			serverInstance.InstanceType = 0
+			serverInstance.Whitelist = nil
+			serverInstance.MaxPlayerCount = -1
+		}
 		serverInstances = append(serverInstances, serverInstance)
 	}
 	client.Instances = serverInstances

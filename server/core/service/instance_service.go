@@ -2,15 +2,19 @@ package service
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"thingue-launcher/common/logger"
 	"thingue-launcher/common/message"
 	"thingue-launcher/common/model"
 	"thingue-launcher/common/request"
+	"thingue-launcher/common/util"
 	"thingue-launcher/server/core/provider"
 	"thingue-launcher/server/global"
+	"time"
 
+	"gorm.io/gorm/clause"
 	"k8s.io/apimachinery/pkg/labels"
 )
 
@@ -30,12 +34,16 @@ func (s *instanceService) UpdatePlayers(streamer *provider.StreamerConnector) *m
 	s.updateLock.Lock()
 	defer s.updateLock.Unlock()
 	instance := s.GetInstanceBySid(streamer.SID)
-	var playerIds []uint
-	for _, connector := range streamer.PlayerConnectors {
+	players := streamer.Players() // 加锁快照
+	playerIds := make(model.UintSlice, 0, len(players))
+	playerIps := make(model.StringSlice, 0, len(players))
+	for _, connector := range players {
 		playerIds = append(playerIds, connector.PlayerId)
+		playerIps = append(playerIps, connector.IP)
 	}
 	instance.PlayerIds = playerIds
-	instance.PlayerCount = uint(len(streamer.PlayerConnectors))
+	instance.PlayerIps = playerIps // 与 PlayerIds 同源同快照，原子一致；权威数据仍在 PlayerConnectors
+	instance.PlayerCount = uint(len(players))
 	if instance.SceneId != "" && instance.CurrentPak == "" {
 		instance.CurrentPak = instance.SceneId
 	}
@@ -48,6 +56,54 @@ func (s *instanceService) UpdateInstance(instance *model.ServerInstance) {
 	s.updateLock.Lock()
 	defer s.updateLock.Unlock()
 	global.SERVER_DB.Save(&instance)
+}
+
+// UpdateInstanceSettings 管理端保存实例分配设置（类型/白名单/连接数上限）：
+// 校验 → 写 SERVER_DB → upsert STORAGE_DB（last-write-wins）→ BroadcastUpdate
+func (s *instanceService) UpdateInstanceSettings(req request.UpdateInstanceSettingsReq) (*model.ServerInstance, error) {
+	s.updateLock.Lock()
+	defer s.updateLock.Unlock()
+	instance := &model.ServerInstance{}
+	if err := global.SERVER_DB.Where("s_id = ?", req.SID).First(instance).Error; err != nil {
+		return nil, errors.New("未找到该实例")
+	}
+	if req.InstanceType != 0 && req.InstanceType != 1 {
+		return nil, errors.New("实例类型非法")
+	}
+	// 白名单逐个 net.ParseIP 强校验，存储规范化格式（兼容 IPv4/IPv6）
+	normalized := make(model.StringSlice, 0, len(req.Whitelist))
+	for _, ip := range req.Whitelist {
+		parsed := util.NormalizeIP(strings.TrimSpace(ip))
+		if parsed == "" {
+			return nil, fmt.Errorf("白名单包含非法IP: %s", ip)
+		}
+		normalized = append(normalized, parsed)
+	}
+	// 连接数上限仅 -1(不限) 或 >=1；0 与其它负数非法
+	if req.MaxPlayerCount < -1 || req.MaxPlayerCount == 0 {
+		return nil, errors.New("连接数上限仅支持-1(不限)或>=1")
+	}
+	// 共享→独占切换需当前连接数<=1（独占实例连接数恒为1）
+	if req.InstanceType == 1 && instance.InstanceType == 0 && instance.PlayerCount > 1 {
+		return nil, errors.New("当前连接数超过1，请先断开后再切换为独占")
+	}
+	// 写 SERVER_DB
+	global.SERVER_DB.Model(&model.ServerInstance{}).Where("s_id = ?", req.SID).Updates(map[string]any{
+		"instance_type":    req.InstanceType,
+		"whitelist":        normalized,
+		"max_player_count": req.MaxPlayerCount,
+	})
+	// upsert STORAGE_DB（单行 last-write-wins），供 register 时合并恢复
+	settings := model.InstanceSettings{
+		SID:            req.SID,
+		InstanceType:   req.InstanceType,
+		Whitelist:      normalized,
+		MaxPlayerCount: req.MaxPlayerCount,
+		LastSeenAt:     time.Now(),
+	}
+	global.STORAGE_DB.Clauses(clause.OnConflict{UpdateAll: true}).Create(&settings)
+	provider.AdminConnProvider.BroadcastUpdate()
+	return s.GetInstanceBySid(req.SID), nil
 }
 
 func (s *instanceService) UpdateStreamerConnected(sid string, connected bool) {

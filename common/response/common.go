@@ -21,6 +21,7 @@ type Response[T any] struct {
 const (
 	ERROR   = 500
 	SUCCESS = 200
+	DENIED  = 403
 )
 
 func Result[T any](code int, data T, msg string, c *gin.Context) {
@@ -54,6 +55,10 @@ func Fail(c *gin.Context) {
 
 func FailWithMessage(message string, c *gin.Context) {
 	Result(ERROR, map[string]interface{}{}, message, c)
+}
+
+func FailWithCode(code int, message string, c *gin.Context) {
+	Result(code, map[string]interface{}{}, message, c)
 }
 
 func FailWithDetailed[T any](data T, message string, c *gin.Context) {

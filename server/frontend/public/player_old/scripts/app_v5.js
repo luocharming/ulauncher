@@ -13,6 +13,7 @@ async function fetchData() {
 			name: urlParams.get("name"),
 			playerCount: urlParams.get("playerCount") ? Number(urlParams.get("playerCount")) : -1,
 			labelSelector: urlParams.get("labelSelector"),
+			shared: true, // 旧播放页默认请求共享实例
 		}),
 	})
 	const resJson = await response.json()
@@ -1869,6 +1870,11 @@ function connect() {
 			ws = undefined;
 			is_reconnection = true;
 
+			// 被管理员断开（4000 "kicked"）：终止无限重连
+			if (event.code === 4000) {
+				is_reconnection = false;
+			}
+
 			// destroy `webRtcPlayerObj` if any
 			let playerDiv = document.getElementById('player');
 			if (webRtcPlayerObj) {
@@ -1878,7 +1884,9 @@ function connect() {
 			}
 
 			showTextOverlay(`Disconnected: ${event.reason}`);
-			var reclickToStart = setTimeout(start, 4000);
+			if (is_reconnection) {
+				var reclickToStart = setTimeout(start, 4000);
+			}
 		};
 	})
 }

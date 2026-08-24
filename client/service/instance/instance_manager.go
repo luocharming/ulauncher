@@ -5,6 +5,7 @@ import (
 	"thingue-launcher/client/global"
 	"thingue-launcher/common/model"
 
+	"github.com/google/uuid"
 	"github.com/jinzhu/copier"
 	"gorm.io/gorm"
 )
@@ -20,6 +21,12 @@ func (m *instanceManager) List() []model.ClientInstance {
 }
 
 func (m *instanceManager) Create(instance *model.ClientInstance) uint {
+	// SID 持久化：新实例创建时即生成稳定标识，随注册上报服务端，
+	// 服务端以 SID 为键持久化实例分配设置
+	if instance.SID == "" {
+		sid, _ := uuid.NewUUID()
+		instance.SID = sid.String()
+	}
 	global.APP_DB.Create(&instance)
 	return instance.CID
 }

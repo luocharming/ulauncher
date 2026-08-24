@@ -5,12 +5,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"thingue-launcher/client/global"
 	"thingue-launcher/common/constants"
 	"thingue-launcher/common/domain"
 	"thingue-launcher/common/logger"
 	"thingue-launcher/common/model"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mitchellh/mapstructure"
 )
 
@@ -96,6 +98,14 @@ func (m *runnerManager) NewRunner(clientInstance *model.ClientInstance) error {
 	}
 	var instance = &domain.Instance{}
 	mapstructure.Decode(clientInstance, instance)
+	// 老 config.db 首次启动自动补 SID 并持久化，保证实例标识跨启动器/服务端重启稳定
+	if instance.SID == "" {
+		sid, _ := uuid.NewUUID()
+		instance.SID = sid.String()
+		clientInstance.SID = instance.SID
+		global.APP_DB.Model(&model.ClientInstance{}).
+			Where("c_id = ?", clientInstance.CID).Update("sid", instance.SID)
+	}
 	r := &Runner{
 		Instance:          instance,
 		ExitSignalChannel: make(chan error, 1),

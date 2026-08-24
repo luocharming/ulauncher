@@ -22,11 +22,13 @@ type Config struct {
 }
 
 type LocalServer struct {
-	ContentPath       string `json:"contentPath" yaml:"contentPath"`
-	BindAddr          string `json:"bindAddr" yaml:"bindAddr"`
-	AutoStart         bool   `json:"autoStart" yaml:"autoStart"`
-	UseExternalStatic bool   `json:"useExternalStatic" yaml:"useExternalStatic"`
-	StaticDir         string `json:"staticDir" yaml:"staticDir"`
+	ContentPath       string   `json:"contentPath" yaml:"contentPath"`
+	BindAddr          string   `json:"bindAddr" yaml:"bindAddr"`
+	AutoStart         bool     `json:"autoStart" yaml:"autoStart"`
+	UseExternalStatic bool     `json:"useExternalStatic" yaml:"useExternalStatic"`
+	StaticDir         string   `json:"staticDir" yaml:"staticDir"`
+	KickDenySeconds   int      `json:"kickDenySeconds" yaml:"kickDenySeconds"` // 被踢IP拒绝窗口(秒)，<=0 视为不拒绝，默认 60
+	TrustedProxies    []string `json:"trustedProxies" yaml:"trustedProxies"`   // 反代/NAT 部署时信任的代理网段；为空则不信任任何代理(默认)
 }
 
 type SystemSettings struct {
@@ -49,6 +51,7 @@ func InitConfigFromFile() {
 	viper.SetDefault("localServer.useExternalStatic", false)
 	viper.SetDefault("localServer.staticDir", constants.SAVE_DIR+"static")
 	viper.SetDefault("localServer.autoStart", true)
+	viper.SetDefault("localServer.kickDenySeconds", 60)
 	viper.SetDefault("systemSettings.logLevel", "info")
 	// 模型库默认配置
 	viper.SetDefault("modelLibrary.enabled", true) // 默认开启

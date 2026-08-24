@@ -2,6 +2,7 @@ package rest
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 	"thingue-launcher/common/util"
 	"thingue-launcher/server/core"
 	"thingue-launcher/server/core/provider"
+	"thingue-launcher/server/core/service"
 
 	"github.com/gin-gonic/gin"
 )
@@ -141,8 +143,14 @@ func (g *InstanceGroup) DownloadLogs(c *gin.Context) {
 func (g *InstanceGroup) TicketSelect(c *gin.Context) {
 	var selectCond request.SelectorCond
 	err := c.ShouldBindJSON(&selectCond)
+	selectCond.ClientIP = c.ClientIP() // 服务端采集，覆盖一切客户端输入
 	ticket, err := core.TicketService.TicketSelect2(selectCond)
 	if err != nil {
+		if errors.Is(err, service.ErrKickedDenied) {
+			// 被踢 IP 在拒绝名单内：403 供 thinguelib 识别后停止自动重连
+			response.FailWithCode(response.DENIED, err.Error(), c)
+			return
+		}
 		response.FailWithDetailed(ticket, err.Error(), c)
 	} else {
 		response.OkWithData(ticket, c)
@@ -227,4 +235,56 @@ func (g *InstanceGroup) SetRestarting(c *gin.Context) {
 		provider.SdpConnProvider.SetStreamerRestartingState(sid, restartingBool)
 		response.OkWithMessage("状态更新成功", c)
 	}
+}
+
+func (g *InstanceGroup) KickPlayerByIp(c *gin.Context) {
+	var req request.KickByIpReq
+	err := c.ShouldBindJSON(&req)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	count, err := core.SdpService.KickPlayerByIp(req.SID, req.IP)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+	} else {
+		response.OkWithDetailed(count, fmt.Sprintf("已断开%d个连接", count), c)
+	}
+}
+
+func (g *InstanceGroup) KickAllPlayers(c *gin.Context) {
+	var req request.KickAllReq
+	err := c.ShouldBindJSON(&req)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	deny := true // 默认被踢 IP 进拒绝名单
+	if req.Deny != nil {
+		deny = *req.Deny
+	}
+	count, err := core.SdpService.KickAllPlayers(req.SID, deny)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+	} else {
+		response.OkWithDetailed(count, fmt.Sprintf("已断开%d个连接", count), c)
+	}
+}
+
+func (g *InstanceGroup) UpdateInstanceSettings(c *gin.Context) {
+	var req request.UpdateInstanceSettingsReq
+	err := c.ShouldBindJSON(&req)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	instance, err := core.InstanceService.UpdateInstanceSettings(req)
+	if err != nil {
+		response.FailWithMessage(err.Error(), c)
+		return
+	}
+	response.OkWithDetailed(map[string]any{
+		"instance":           instance,
+		"currentPlayerCount": instance.PlayerCount,
+	}, "设置已保存", c)
 }

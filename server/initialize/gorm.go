@@ -35,7 +35,8 @@ func initStorageDB() {
 	if err = db.AutoMigrate(
 		&model.CloudFile{},
 		&model.CloudRes{},
-		&model.ModelAsset{}, // 模型资产表
+		&model.ModelAsset{},        // 模型资产表
+		&model.InstanceSettings{},  // 实例分配设置（按 SID 持久化）
 	); err != nil {
 		logger.Zap.Error(err)
 	}

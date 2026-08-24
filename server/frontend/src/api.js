@@ -41,3 +41,27 @@ export function downloadLogs(id) {
         responseType: "blob"
     });
 }
+
+export function kickPlayerByIp(data) {
+    return request({
+        url: `/instance/kickPlayerByIp`,
+        method: 'POST',
+        data
+    });
+}
+
+export function kickAllPlayers(data) {
+    return request({
+        url: `/instance/kickAllPlayers`,
+        method: 'POST',
+        data
+    });
+}
+
+export function updateInstanceSettings(data) {
+    return request({
+        url: `/instance/updateInstanceSettings`,
+        method: 'POST',
+        data
+    });
+}

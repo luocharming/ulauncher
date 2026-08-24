@@ -13,7 +13,8 @@ type sdpConnProvider struct {
 	idStreamerMap map[string]*StreamerConnector
 	idPlayerMap   map[uint]*PlayerConnector
 	restartingMap map[string]bool
-	stateLock     sync.Mutex
+	mapLock       sync.RWMutex // 保护 idStreamerMap/idPlayerMap 的增删与遍历
+	stateLock     sync.Mutex   // 保护 restartingMap
 }
 
 var SdpConnProvider = sdpConnProvider{
@@ -32,21 +33,39 @@ func (sdp *sdpConnProvider) NewStreamer(sid string, conn *websocket.Conn, enable
 		EnableRenderControl: enableRenderControl,
 	}
 	streamer.AutoStopTimer.Stop()
+	sdp.mapLock.Lock()
 	sdp.idStreamerMap[streamer.SID] = streamer
+	sdp.mapLock.Unlock()
 	return streamer
 }
 
+func (sdp *sdpConnProvider) RemoveStreamer(sid string) {
+	sdp.mapLock.Lock()
+	delete(sdp.idStreamerMap, sid)
+	sdp.mapLock.Unlock()
+}
+
 func (sdp *sdpConnProvider) NewPlayer(conn *websocket.Conn) *PlayerConnector {
+	sdp.mapLock.Lock()
 	sdp.playerIdCount++
 	player := &PlayerConnector{
 		PlayerId: sdp.playerIdCount,
 		conn:     conn,
 	}
 	sdp.idPlayerMap[player.PlayerId] = player
+	sdp.mapLock.Unlock()
 	return player
 }
 
+func (sdp *sdpConnProvider) RemovePlayer(id uint) {
+	sdp.mapLock.Lock()
+	delete(sdp.idPlayerMap, id)
+	sdp.mapLock.Unlock()
+}
+
 func (sdp *sdpConnProvider) GetStreamer(id string) (*StreamerConnector, error) {
+	sdp.mapLock.RLock()
+	defer sdp.mapLock.RUnlock()
 	connector, ok := sdp.idStreamerMap[id]
 	if ok {
 		return connector, nil
@@ -56,6 +75,8 @@ func (sdp *sdpConnProvider) GetStreamer(id string) (*StreamerConnector, error) {
 }
 
 func (sdp *sdpConnProvider) GetPlayer(id uint) (*PlayerConnector, error) {
+	sdp.mapLock.RLock()
+	defer sdp.mapLock.RUnlock()
 	connector, ok := sdp.idPlayerMap[id]
 	if ok {
 		return connector, nil
@@ -65,6 +86,8 @@ func (sdp *sdpConnProvider) GetPlayer(id uint) (*PlayerConnector, error) {
 }
 
 func (sdp *sdpConnProvider) GetPlayersByUserData(userMap map[string]string) []*PlayerConnector {
+	sdp.mapLock.RLock()
+	defer sdp.mapLock.RUnlock()
 	var players []*PlayerConnector
 	for _, connector := range sdp.idPlayerMap {
 		matched := true

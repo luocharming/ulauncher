@@ -11,6 +11,13 @@ import (
 
 func BuildRouter() *gin.Engine {
 	Router := gin.Default()
+	// IP 采集信任边界：默认不信任任何代理（防 X-Forwarded-For 伪造，ClientIP 回落 RemoteAddr）；
+	// 反代/NAT 部署时通过 localServer.trustedProxies 显式配置代理网段
+	if len(provider.AppConfig.LocalServer.TrustedProxies) > 0 {
+		_ = Router.SetTrustedProxies(provider.AppConfig.LocalServer.TrustedProxies)
+	} else {
+		_ = Router.SetTrustedProxies(nil)
+	}
 	Router.Use(CorsMiddleware())
 	//初始化base路由组
 	baseGroup := Router.Group(provider.AppConfig.LocalServer.ContentPath)

@@ -149,6 +149,8 @@ async function playerUrlBuilder() {
             name: urlParams.get("name"),
             playerCount: urlParams.get("playerCount") ? Number(urlParams.get("playerCount")) : -1,
             labelSelector: urlParams.get("labelSelector"),
+            // 请求实例类型：shared=false 为独占实例，默认(不传或true)为共享实例
+            shared: urlParams.get("shared") !== "false",
         }),
     })
     const resJson = await response.json()

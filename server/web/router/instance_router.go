@@ -30,6 +30,9 @@ func (s *instanceRouter) BuildRouter(Router *gin.RouterGroup) (R gin.IRoutes) {
 		instanceRouter.GET("downloadLogs", handler.InstanceGroup.DownloadLogs)
 		instanceRouter.GET("getInstanceByHostnameAndPid", handler.InstanceGroup.GetInstanceByHostnameAndPid)
 		instanceRouter.GET("kickPlayerUser", handler.InstanceGroup.KickPlayerUser)
+		instanceRouter.POST("kickPlayerByIp", handler.InstanceGroup.KickPlayerByIp)
+		instanceRouter.POST("kickAllPlayers", handler.InstanceGroup.KickAllPlayers)
+		instanceRouter.POST("updateInstanceSettings", handler.InstanceGroup.UpdateInstanceSettings)
 	}
 	return instanceRouter
 }

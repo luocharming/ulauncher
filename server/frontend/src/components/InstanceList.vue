@@ -1,8 +1,8 @@
 <script setup>
 import {onMounted, ref, watch} from 'vue';
 import {getPaksName, processStateToText} from '@/utils';
-import {controlProcess, getClientList, sendPakControl} from '@/api';
-import {Notify} from 'quasar';
+import {controlProcess, getClientList, kickAllPlayers, kickPlayerByIp, sendPakControl} from '@/api';
+import {Dialog, Notify} from 'quasar';
 import {emitter} from "@/ws";
 
 const rows = ref([])
@@ -22,7 +22,19 @@ const columns = [
 const subColumns = [
   {name: 'status', label: '进程状态', field: (row) => processStateToText(row.stateCode), align: 'center'},
   {name: 'status', label: 'Streamer状态', field: (row) => row.streamerConnected ? '已连接' : '未连接', align: 'center'},
-  {name: 'players', label: '连接数', field: (row) => (row.playerIds ? row.playerIds.length : 0), align: 'center'}
+  {
+    name: 'players',
+    label: '连接数',
+    field: (row) => {
+      // 独占实例连接数恒为1：连接数为0展示"未分配"；共享实例展示已连接数
+      if (row.instanceType === 1) {
+        return row.playerCount === 0 ? '未分配' : '已占用'
+      }
+      return `已连接 ${row.playerCount || 0}`
+    },
+    align: 'center'
+  },
+  {name: 'playerIps', label: 'IP', field: (row) => row.playerIps || [], align: 'center'}
 ];
 
 const expanded = ref([])
@@ -68,6 +80,32 @@ function handleClear(value) {
     Notify.create({type: 'warning', position: 'top', message: '无效操作'});
   }
   console.log(value);
+}
+
+function kickByIp(row, ip) {
+  Dialog.create({
+    title: '确认断开',
+    message: `确定断开 ${ip} 与实例《${row.name}》的连接？`,
+    ok: {label: '断开', color: 'negative'},
+    cancel: {label: '取消'}
+  }).onOk(() => {
+    kickPlayerByIp({sid: row.sid, ip}).catch(() => {
+      Notify.create({type: 'negative', position: 'top', message: '断开失败'});
+    });
+  });
+}
+
+function kickAll(row) {
+  Dialog.create({
+    title: '确认全部断开',
+    message: `确定断开实例《${row.name}》的全部客户端连接？`,
+    ok: {label: '全部断开', color: 'negative'},
+    cancel: {label: '取消'}
+  }).onOk(() => {
+    kickAllPlayers({sid: row.sid}).catch(() => {
+      Notify.create({type: 'negative', position: 'top', message: '断开失败'});
+    });
+  });
 }
 
 async function list() {
@@ -141,8 +179,17 @@ onMounted(() => {
                   <q-btn padding="none" flat no-caps dense color="primary" :href="`player.html?sid=${props.row.sid}`"
                          target="_blank" :label="props.row.name"/>
                 </q-td>
-                <q-td v-for="col in props.cols" :key="col.name" :props="props">
-                  {{ col.value }}
+                <q-td v-for="col in props.cols" :key="col.name" :props="props" align="center">
+                  <template v-if="col.name === 'playerIps'">
+                    <div class="row items-center justify-center q-gutter-xs">
+                      <q-chip v-for="ip in col.value" :key="ip" dense size="sm" removable
+                              @remove="kickByIp(props.row, ip)">
+                        {{ ip }}
+                      </q-chip>
+                      <span v-if="!col.value || col.value.length === 0">-</span>
+                    </div>
+                  </template>
+                  <template v-else>{{ col.value }}</template>
                 </q-td>
                 <q-td auto-width>
                   <div class="q-gutter-md" style="min-width: 135px">
@@ -167,6 +214,9 @@ onMounted(() => {
                     <q-btn size="sm" color="positive" round dense icon="play_arrow"
                            @click="start(props.row.sid)"></q-btn>
                     <q-btn size="sm" color="negative" round dense icon="stop" @click="stop(props.row.sid)"></q-btn>
+                    <q-btn size="sm" color="orange" round dense icon="link_off" title="全部断开"
+                           :disable="!(props.row.playerIps && props.row.playerIps.length > 0)"
+                           @click="kickAll(props.row)"></q-btn>
                   </div>
                 </q-td>
               </q-tr>

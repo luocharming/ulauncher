@@ -24,6 +24,11 @@ type ServerInstance struct {
 	EnableRenderControl  bool                `json:"enableRenderControl"`
 	EnableAutoStart	  	 bool                `json:"enableAutoStart"`
 	EnableSharedInstance bool                `json:"enableSharedInstance"`
+	// ---- 实例分配（需求2/3）：持久化来源为 STORAGE_DB 的 InstanceSettings，register 时合并 ----
+	InstanceType   int8        `json:"instanceType" gorm:"default:0"`    // 0=共享(默认) 1=独占
+	Whitelist      StringSlice `json:"whitelist"`                        // 白名单 IP；空=不过滤
+	MaxPlayerCount int         `json:"maxPlayerCount" gorm:"default:-1"` // 共享连接数上限：-1=不限(默认)；独占忽略(恒按1)
+	PlayerIps      StringSlice `json:"playerIps"`                        // 已连接客户端 IP 镜像（权威数据在 PlayerConnectors）
 	LastStartAt          time.Time           `json:"lastStartAt"`
 	LastStopAt           time.Time           `json:"lastStopAt"`
 	Pid                  int                 `json:"pid"`

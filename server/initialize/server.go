@@ -5,6 +5,7 @@ import (
 	"gorm.io/gorm"
 	"net/http"
 	"thingue-launcher/common/logger"
+	"time"
 	"thingue-launcher/common/model"
 	"thingue-launcher/common/provider"
 	coreprovider "thingue-launcher/server/core/provider"
@@ -54,6 +55,8 @@ func (s *server) Serve() {
 	}
 	global.SERVER_DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&model.Client{})
 	global.SERVER_DB.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&model.ServerInstance{})
+	// 清理孤儿 InstanceSettings：客户端删除实例/重装后超过 30 天未再 register 的设置行
+	global.STORAGE_DB.Where("last_seen_at < ?", time.Now().AddDate(0, 0, -30)).Delete(&model.InstanceSettings{})
 	// 构建gin路由
 	s.router = router.BuildRouter()
 	// Listen

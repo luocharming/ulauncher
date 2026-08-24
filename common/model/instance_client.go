@@ -10,7 +10,7 @@ import (
 
 type ClientInstance struct {
 	CID                    uint                `json:"cid" gorm:"primarykey"`
-	SID                    string              `json:"sid" gorm:"-"`
+	SID                    string              `json:"sid"` // 持久化到客户端 config.db，作为服务端设置（InstanceSettings）的关联键
 	Name                   string              `json:"name"`
 	SceneId                string              `json:"sceneId"`
 	ExecPath               string              `json:"execPath"`

@@ -15,6 +15,9 @@ type PlayerConnector struct {
 	StreamerConnector *StreamerConnector
 	conn              *websocket.Conn
 	UserData          map[string]string
+	IP                string // 服务端采集的客户端 IP（gin c.ClientIP）
+	Ticket            string // 配对时消费预留的 ticket（ConnectStreamer 成功时记录）
+	Paired            bool   // 配对幂等标记（仅归属读循环协程读写）
 	heartbeatTicker   *time.Ticker
 }
 
@@ -93,7 +96,7 @@ func (p *PlayerConnector) SendCloseMsg(code int, msg string) {
 }
 
 func (p *PlayerConnector) KickOthers() {
-	for _, kickPlayer := range p.StreamerConnector.PlayerConnectors {
+	for _, kickPlayer := range p.StreamerConnector.Players() {
 		if p != kickPlayer {
 			kickPlayer.SendCloseMsg(4000, "kicked")
 		}
@@ -108,7 +111,7 @@ func (p *PlayerConnector) Kick() {
 
 func (p *PlayerConnector) Close() {
 	_ = p.conn.Close()
-	delete(SdpConnProvider.idPlayerMap, p.PlayerId)
+	SdpConnProvider.RemovePlayer(p.PlayerId)
 }
 
 func (p *PlayerConnector) StartPingSendTask() {
