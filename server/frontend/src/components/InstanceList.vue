@@ -21,7 +21,7 @@ const columns = [
 
 const subColumns = [
   {name: 'status', label: '进程状态', field: (row) => processStateToText(row.stateCode), align: 'center'},
-  {name: 'status', label: 'Streamer状态', field: (row) => row.streamerConnected ? '已连接' : '未连接', align: 'center'},
+  {name: 'streamerStatus', label: 'Streamer状态', field: (row) => row.streamerConnected ? '已连接' : '未连接', align: 'center'},
   {
     name: 'players',
     label: '连接数',

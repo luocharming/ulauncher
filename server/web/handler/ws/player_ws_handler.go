@@ -27,6 +27,7 @@ func (g *HandlerGroup) PlayerWebSocketHandler(c *gin.Context) {
 	player.IP = c.ClientIP() // 服务端采集客户端 IP
 	player.UserData = userData
 	player.StartPingSendTask()
+	logger.Zap.Infof("玩家连接 ticket=%s IP=%s", c.Param("ticket"), player.IP)
 	// 连接Streamer
 	err = service.SdpService.ConnectStreamer(player, c.Param("ticket"))
 	if err == nil {

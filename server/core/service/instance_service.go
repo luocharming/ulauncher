@@ -47,7 +47,10 @@ func (s *instanceService) UpdatePlayers(streamer *provider.StreamerConnector) *m
 	if instance.SceneId != "" && instance.CurrentPak == "" {
 		instance.CurrentPak = instance.SceneId
 	}
-	global.SERVER_DB.Save(&instance)
+	if err := global.SERVER_DB.Save(&instance).Error; err != nil {
+		logger.Zap.Errorf("实例玩家状态写入失败 SID=%s err=%v", streamer.SID, err)
+	}
+	logger.Zap.Infof("实例玩家更新 SID=%s 玩家数=%d IPs=%v", streamer.SID, len(players), playerIps)
 	provider.AdminConnProvider.BroadcastUpdate()
 	return instance
 }

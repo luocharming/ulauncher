@@ -99,15 +99,21 @@ func (m *sdpService) ConnectStreamer(playerConnector *provider.PlayerConnector, 
 			ticker := time.NewTicker(2 * time.Second)
 			for {
 				<-ticker.C
-				streamer, err := provider.SdpConnProvider.GetStreamer(sid)
+				streamer, err = provider.SdpConnProvider.GetStreamer(sid)
 				if err == nil {
 					playerConnector.StreamerConnector = streamer
-					playerConnector.Ticket = ticket
 					ticker.Stop()
 					break
 				}
 			}
 			logger.Zap.Info("自动启动成功")
+			// 自动启动等待可能超过 ticket 预留的 10s TTL（原预留已随 sweep 失效），
+			// 重新预留新 ticket，配对时 Consume 才能通过；容量判定沿用实例类型（独占恒按1）
+			if ticketId, reserveErr := TicketService.Reserve(sid, playerConnector.IP, instance.InstanceType == 0); reserveErr == nil {
+				playerConnector.Ticket = ticketId
+			} else {
+				err = reserveErr
+			}
 			// sceneId := TicketService.GetSceneIDBySid(sid)
 			sceneId := instance.SceneId
 			if sceneId != "" {
@@ -145,6 +151,7 @@ func (m *sdpService) OnPlayerPaired(player *provider.PlayerConnector) error {
 	}
 	// ticket 消费：校验存在/未过期/未消费/归属
 	if err := TicketService.Consume(player.Ticket, streamer.SID); err != nil {
+		logger.Zap.Infof("玩家配对失败(ticket消费) SID=%s IP=%s err=%v", streamer.SID, player.IP, err)
 		player.SendCloseMsg(4001, "ticket无效或过期")
 		return err
 	}
@@ -163,6 +170,7 @@ func (m *sdpService) OnPlayerPaired(player *provider.PlayerConnector) error {
 	player.Paired = true
 	streamer.SendPlayersCount()
 	InstanceService.UpdatePlayers(streamer)
+	logger.Zap.Infof("玩家配对成功 SID=%s IP=%s 当前玩家数=%d", streamer.SID, player.IP, len(streamer.Players()))
 	// 如果未开启渲染，则发消息开启
 	if !streamer.RenderingState {
 		streamer.ControlRendering(true)
