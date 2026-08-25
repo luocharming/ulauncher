@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strconv"
+	"thingue-launcher/common/logger"
 	"thingue-launcher/common/message"
 	"thingue-launcher/common/model"
 	"thingue-launcher/common/request"
@@ -144,6 +145,9 @@ func (g *InstanceGroup) TicketSelect(c *gin.Context) {
 	var selectCond request.SelectorCond
 	err := c.ShouldBindJSON(&selectCond)
 	selectCond.ClientIP = c.ClientIP() // 服务端采集，覆盖一切客户端输入
+	logger.Zap.Infof("ticketSelect 收到请求 ClientIP=%s RemoteAddr=%s X-Forwarded-For=%q X-Real-IP=%q 参数=%+v",
+		selectCond.ClientIP, c.Request.RemoteAddr,
+		c.Request.Header.Get("X-Forwarded-For"), c.Request.Header.Get("X-Real-IP"), selectCond)
 	ticket, err := core.TicketService.TicketSelect2(selectCond)
 	if err != nil {
 		if errors.Is(err, service.ErrKickedDenied) {

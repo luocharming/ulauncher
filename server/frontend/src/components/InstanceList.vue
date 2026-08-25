@@ -23,6 +23,12 @@ const subColumns = [
   {name: 'status', label: '进程状态', field: (row) => processStateToText(row.stateCode), align: 'center'},
   {name: 'streamerStatus', label: 'Streamer状态', field: (row) => row.streamerConnected ? '已连接' : '未连接', align: 'center'},
   {
+    name: 'instanceType',
+    label: '是否共享实例',
+    field: (row) => row.instanceType === 1 ? '否（独占）' : '是（共享）',
+    align: 'center'
+  },
+  {
     name: 'players',
     label: '连接数',
     field: (row) => {
@@ -34,6 +40,7 @@ const subColumns = [
     },
     align: 'center'
   },
+  {name: 'whitelist', label: '白名单IP', field: (row) => row.whitelist || [], align: 'center'},
   {name: 'playerIps', label: 'IP', field: (row) => row.playerIps || [], align: 'center'}
 ];
 
@@ -186,6 +193,12 @@ onMounted(() => {
                               @remove="kickByIp(props.row, ip)">
                         {{ ip }}
                       </q-chip>
+                      <span v-if="!col.value || col.value.length === 0">-</span>
+                    </div>
+                  </template>
+                  <template v-else-if="col.name === 'whitelist'">
+                    <div class="row items-center justify-center q-gutter-xs">
+                      <q-chip v-for="ip in col.value" :key="ip" dense size="sm" outline>{{ ip }}</q-chip>
                       <span v-if="!col.value || col.value.length === 0">-</span>
                     </div>
                   </template>

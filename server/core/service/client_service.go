@@ -57,10 +57,15 @@ func (s *clientService) ClientRegister(registerInfo *request.ClientRegisterInfo)
 			serverInstance.MaxPlayerCount = settings.MaxPlayerCount
 			settings.LastSeenAt = time.Now()
 			global.STORAGE_DB.Save(&settings)
+			logger.Zap.Infof("实例注册合并设置 SID=%s 名称=%s 来源=持久化 类型=%d 白名单=%v 上限=%d",
+				serverInstance.SID, serverInstance.Name, serverInstance.InstanceType,
+				serverInstance.Whitelist, serverInstance.MaxPlayerCount)
 		} else {
 			serverInstance.InstanceType = 0
 			serverInstance.Whitelist = nil
 			serverInstance.MaxPlayerCount = -1
+			logger.Zap.Infof("实例注册合并设置 SID=%s 名称=%s 来源=默认(无持久化行) 类型=0 白名单=空 上限=-1",
+				serverInstance.SID, serverInstance.Name)
 		}
 		serverInstances = append(serverInstances, serverInstance)
 	}
