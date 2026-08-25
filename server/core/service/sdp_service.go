@@ -4,10 +4,45 @@ import (
 	"errors"
 	"thingue-launcher/common/logger"
 	"thingue-launcher/common/message"
+	"thingue-launcher/common/model"
 	"thingue-launcher/common/request"
 	"thingue-launcher/server/core/provider"
 	"time"
 )
+
+// 玩家连接失败时回给客户端的 WebSocket 关闭码。
+// 客户端据此区分"服务端明确拒绝"与"网络异常"：前者不能立即重连，
+// 因为 SDK 的重连会重新申请 ticket，等于换一台实例重新分配、重新拉起。
+const (
+	ClosePlayerKicked      = 4000 // 被管理员断开（拒绝名单生效期间）
+	ClosePlayerTicket      = 4001 // ticket 无效或过期
+	ClosePlayerUnavailable = 4002 // 实例不可用：未启动、启动超时、预留失败
+)
+
+const (
+	// autoStartPollInterval 等待实例自动启动完成的轮询间隔
+	autoStartPollInterval = 2 * time.Second
+	// autoStartTimeout 自动启动最长等待时间。超时后主动断开，
+	// 避免实例始终起不来时 handler 协程与连接无限期挂着（此前是无上限的死等）。
+	autoStartTimeout = 60 * time.Second
+)
+
+// connectError 携带关闭码的连接失败原因，由 handler 统一发送关闭帧后断开
+type connectError struct {
+	Code   int
+	Reason string
+}
+
+func (e *connectError) Error() string { return e.Reason }
+
+// PlayerCloseCode 取出连接失败对应的关闭码与原因；非 connectError 一律按实例不可用处理
+func PlayerCloseCode(err error) (int, string) {
+	var ce *connectError
+	if errors.As(err, &ce) {
+		return ce.Code, ce.Reason
+	}
+	return ClosePlayerUnavailable, err.Error()
+}
 
 type sdpService struct{}
 
@@ -64,72 +99,98 @@ func (m *sdpService) OnStreamerDisconnect(streamer *provider.StreamerConnector) 
 func (m *sdpService) ConnectStreamer(playerConnector *provider.PlayerConnector, ticket string) error {
 	if ticket == "test" {
 		streamer, err := provider.SdpConnProvider.GetStreamer("test")
-		if err == nil {
-			playerConnector.StreamerConnector = streamer
-			// 走统一预留机制，配对时可正常 Consume
-			if ticketId, reserveErr := TicketService.Reserve("test", playerConnector.IP, true); reserveErr == nil {
-				playerConnector.Ticket = ticketId
-			} else {
-				err = reserveErr
-			}
+		if err != nil {
+			return &connectError{Code: ClosePlayerUnavailable, Reason: err.Error()}
 		}
-		return err
+		playerConnector.StreamerConnector = streamer
+		// 走统一预留机制，配对时可正常 Consume
+		ticketId, err := TicketService.Reserve("test", playerConnector.IP, true)
+		if err != nil {
+			return &connectError{Code: ClosePlayerUnavailable, Reason: err.Error()}
+		}
+		playerConnector.Ticket = ticketId
+		return nil
 	}
 	sid, err := TicketService.GetSidByTicket(ticket)
 	if err != nil {
-		playerConnector.SendCloseMsg(4001, "ticket无效或过期")
-		return err
+		return &connectError{Code: ClosePlayerTicket, Reason: "ticket无效或过期"}
 	}
+	// 指名直选签发的 ticket（player.html?sid=/?name=、getTicketById）不参与分配策略，
+	// 记录下来供自动启动后重新预留与配对兜底放行
+	playerConnector.Direct = TicketService.IsDirectTicket(ticket)
 	// ticket 发出后被踢的窗口：upgrade 之后再次检查拒绝名单（问题1 第二层拦截）
 	if DenyService.IsDenied(playerConnector.IP) {
-		playerConnector.SendCloseMsg(4000, "kicked")
-		return errors.New("已被断开")
+		return &connectError{Code: ClosePlayerKicked, Reason: "kicked"}
 	}
 	streamer, err := provider.SdpConnProvider.GetStreamer(sid)
 	if err == nil {
 		playerConnector.StreamerConnector = streamer
 		playerConnector.Ticket = ticket
-	} else {
-		instance := InstanceService.GetInstanceBySid(sid)
-		if instance.AutoControl {
-			InstanceService.ProcessControl(request.ProcessControl{
-				SID:     sid,
-				Command: "START",
-			})
-			ticker := time.NewTicker(2 * time.Second)
-			for {
-				<-ticker.C
-				streamer, err = provider.SdpConnProvider.GetStreamer(sid)
-				if err == nil {
-					playerConnector.StreamerConnector = streamer
-					ticker.Stop()
-					break
-				}
-			}
-			logger.Zap.Info("自动启动成功")
-			// 自动启动等待可能超过 ticket 预留的 10s TTL（原预留已随 sweep 失效），
-			// 重新预留新 ticket，配对时 Consume 才能通过；容量判定沿用实例类型（独占恒按1）
-			if ticketId, reserveErr := TicketService.Reserve(sid, playerConnector.IP, instance.InstanceType == 0); reserveErr == nil {
-				playerConnector.Ticket = ticketId
-			} else {
-				err = reserveErr
-			}
-			// sceneId := TicketService.GetSceneIDBySid(sid)
-			sceneId := instance.SceneId
-			if sceneId != "" {
-				control := request.PakControl{
-					SID:  sid,
-					Type: "load",
-					Pak:  "Paks/" + sceneId,
-				}
-				InstanceService.PakControl(control)
-			}
+		return nil
+	}
+	instance := InstanceService.GetInstanceBySid(sid)
+	if !instance.AutoControl {
+		return &connectError{Code: ClosePlayerUnavailable, Reason: "streamer未连接且未开启自动启动"}
+	}
+	return m.waitAutoStart(playerConnector, ticket, sid, instance)
+}
 
-		} else {
-			err = errors.New("streamer未连接且未开启自动启动")
+// waitAutoStart 触发实例自动启动并等待 streamer 上线，等待期间持续为该玩家的 ticket 续期预留。
+//
+// 续期而不是重新预留是关键：自动启动通常 2~4s 就完成，玩家自己的预留还在 10s TTL 内，
+// 此时若调 Reserve 重新预留，这份预留会被算成占用者，独占实例必然返回「实例已被独占占用」
+// → 连接失败被断开 → SDK 自动重连 → 重新 ticketSelect → 分到下一台独占实例再拉起，
+// 一次点击连锁启动多台实例。续期同时也保证冷启动这几秒里实例不会被别的玩家抢走。
+func (m *sdpService) waitAutoStart(playerConnector *provider.PlayerConnector, ticket, sid string, instance *model.ServerInstance) error {
+	InstanceService.ProcessControl(request.ProcessControl{
+		SID:     sid,
+		Command: "START",
+	})
+	ticker := time.NewTicker(autoStartPollInterval)
+	defer ticker.Stop()
+	start := time.Now()
+	deadline := start.Add(autoStartTimeout)
+	reserved := true // 原预留是否仍由本玩家持有
+	var streamer *provider.StreamerConnector
+	for {
+		<-ticker.C
+		if reserved {
+			reserved = TicketService.Renew(ticket, sid)
+		}
+		var err error
+		if streamer, err = provider.SdpConnProvider.GetStreamer(sid); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			logger.Zap.Warnf("自动启动超时 SID=%s 名称=%s IP=%s 已等待=%.0fs",
+				sid, instance.Name, playerConnector.IP, time.Since(start).Seconds())
+			return &connectError{Code: ClosePlayerUnavailable, Reason: "实例启动超时"}
 		}
 	}
-	return err
+	playerConnector.StreamerConnector = streamer
+	logger.Zap.Infof("自动启动成功 SID=%s 名称=%s IP=%s 耗时=%.1fs 预留续期=%v",
+		sid, instance.Name, playerConnector.IP, time.Since(start).Seconds(), reserved)
+	if reserved {
+		// 预留全程保活，直接沿用原 ticket，配对时正常 Consume
+		playerConnector.Ticket = ticket
+	} else if playerConnector.Direct {
+		// 等待超过 TTL 且预留已被 sweep：指名直选不做容量判据，重新预留必定成功
+		playerConnector.Ticket = TicketService.ReserveDirect(sid, playerConnector.IP)
+	} else if ticketId, reserveErr := TicketService.Reserve(sid, playerConnector.IP, instance.InstanceType == 0); reserveErr == nil {
+		// 原预留已失效，此时按实例类型重新判容量（独占恒按 1）不会再撞上自己
+		playerConnector.Ticket = ticketId
+	} else {
+		return &connectError{Code: ClosePlayerUnavailable, Reason: reserveErr.Error()}
+	}
+	// sceneId := TicketService.GetSceneIDBySid(sid)
+	if sceneId := instance.SceneId; sceneId != "" {
+		InstanceService.PakControl(request.PakControl{
+			SID:  sid,
+			Type: "load",
+			Pak:  "Paks/" + sceneId,
+		})
+	}
+	return nil
 }
 
 func (m *sdpService) OnStreamerLoadBundleComplete(streamer *provider.StreamerConnector) {
@@ -152,18 +213,19 @@ func (m *sdpService) OnPlayerPaired(player *provider.PlayerConnector) error {
 	// ticket 消费：校验存在/未过期/未消费/归属
 	if err := TicketService.Consume(player.Ticket, streamer.SID); err != nil {
 		logger.Zap.Infof("玩家配对失败(ticket消费) SID=%s IP=%s err=%v", streamer.SID, player.IP, err)
-		player.SendCloseMsg(4001, "ticket无效或过期")
+		player.SendCloseMsg(ClosePlayerTicket, "ticket无效或过期")
 		return err
 	}
 	// 被踢拒绝名单兜底复检（问题1 第三层拦截）
 	if DenyService.IsDenied(player.IP) {
-		player.SendCloseMsg(4000, "kicked")
+		player.SendCloseMsg(ClosePlayerKicked, "kicked")
 		return errors.New("已被断开")
 	}
-	// 独占容量防御性兜底（预留已防，双保险）：独占实例已有玩家则拒绝
+	// 独占容量防御性兜底（预留已防，双保险）：独占实例已有玩家则拒绝。
+	// 指名直选（sid/name 点名实例，含管理端实例列表点实例名预览）不受此约束。
 	instance := InstanceService.GetInstanceBySid(streamer.SID)
-	if instance.InstanceType == 1 && len(streamer.Players()) >= 1 {
-		player.SendCloseMsg(4001, "实例已被独占占用")
+	if !player.Direct && instance.InstanceType == 1 && len(streamer.Players()) >= 1 {
+		player.SendCloseMsg(ClosePlayerUnavailable, "实例已被独占占用")
 		return errors.New("实例已被独占占用")
 	}
 	streamer.AddPlayer(player)
@@ -234,7 +296,7 @@ func (m *sdpService) KickAllPlayers(sid string, deny bool) (int, error) {
 // kickOne 踢单个玩家：发送关闭消息 + 立即移出切片并通知 streamer + 更新实例计数与广播。
 // 随后的 OnPlayerDisConnect 会再次触发，RemovePlayer 查找式删除幂等安全。
 func (m *sdpService) kickOne(streamer *provider.StreamerConnector, p *provider.PlayerConnector) {
-	p.SendCloseMsg(4000, "kicked")
+	p.SendCloseMsg(ClosePlayerKicked, "kicked")
 	streamer.RemovePlayer(p)
 	streamer.SendPlayersCount()
 	InstanceService.UpdatePlayers(streamer)

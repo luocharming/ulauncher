@@ -71,7 +71,7 @@ go test ./server/...
 
 ### Pixel Streaming 信令流程（核心业务）
 
-1. 播放端先请求 REST `POST /api/instance/ticketSelect`（`TicketService.TicketSelect2`）获取一次性 ticket（10 秒有效期，`gcache` 缓存 ticket→SID）。分配策略：请求按 `shared` 三态（nil/true=共享、false=独占）进类型池；SID 直选只做容量校验；携带 sceneId 走四级优先级（已加载目标场景 → 空闲 → 连接数为 0 → 共享需 `EnableSharedInstance`）；无 sceneId 严格按客户端/实例顺序两段式分配（白名单命中段 → 无白名单段）。每步容量判断+预留（`Reserve`，独占恒 1、共享按 `MaxPlayerCount`，-1 不限）在 `resMu` 临界区内原子完成，ticket 在配对时 `Consume`（一次性）。被踢 IP 写入拒绝名单（`DenyService`，TTL 默认 60s），ticketSelect/ws 升级/配对三层拦截，断开码 4000，被拒 403
+1. 播放端先请求 REST `POST /api/instance/ticketSelect`（`TicketService.TicketSelect2`）获取一次性 ticket（10 秒有效期，`gcache` 缓存 ticket→SID）。分配策略：请求按 `shared` 三态（nil/true=共享、false=独占）进类型池；**指名直选**（请求带 `sid` 或 `name`，含管理端实例列表点实例名跳转的 `player.html?sid=` 与 `getTicketById`）不参与分配策略——不做类型池、白名单准入与容量判据，只保留 ready 过滤，走 `ReserveDirect` 出票（预留标记 `direct`，配对时的独占容量兜底同样放行）；携带 sceneId 走四级优先级（已加载目标场景 → 空闲 → 连接数为 0 → 共享需 `EnableSharedInstance`）；无 sceneId 严格按客户端/实例顺序两段式分配（白名单命中段 → 无白名单段）。每步容量判断+预留（`Reserve`，独占恒 1、共享按 `MaxPlayerCount`，-1 不限）在 `resMu` 临界区内原子完成，ticket 在配对时 `Consume`（一次性）。被踢 IP 写入拒绝名单（`DenyService`，TTL 默认 60s），ticketSelect/ws 升级/配对三层拦截，断开码 4000，被拒 403
 2. 播放端连接 `/ws/player/:ticket`，`SdpService.ConnectStreamer` 将 ticket 解析为 SID 并拿到 `StreamerConnector`；若实例未运行但开了 `AutoControl`，会先下发 START 并轮询等待 Streamer 连接
 3. Player 发 `offer`/`subscribe` 后与 Streamer 配对（`OnPlayerPaired`），之后双向转发 `offer`/`answer`/`iceCandidate`
 4. 玩家数变化时更新实例的 `PlayerCount` 并广播给管理端；开启 `EnableRenderControl` 时，无玩家会自动发送 rendering=false 指令关闭渲染

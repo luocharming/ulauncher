@@ -8,6 +8,7 @@ import (
 	"thingue-launcher/common/provider"
 	"thingue-launcher/common/util"
 	"time"
+	"unicode/utf8"
 )
 
 type PlayerConnector struct {
@@ -17,6 +18,7 @@ type PlayerConnector struct {
 	UserData          map[string]string
 	IP                string // 服务端采集的客户端 IP（gin c.ClientIP）
 	Ticket            string // 配对时消费预留的 ticket（ConnectStreamer 成功时记录）
+	Direct            bool   // ticket 由指名直选（sid/name）签发：不受独占容量兜底约束
 	Paired            bool   // 配对幂等标记（仅归属读循环协程读写）
 	heartbeatTicker   *time.Ticker
 }
@@ -89,10 +91,27 @@ func (p *PlayerConnector) SendPingMsg() error {
 }
 
 func (p *PlayerConnector) SendCloseMsg(code int, msg string) {
-	err := p.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, msg))
+	err := p.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(code, truncateCloseReason(msg)))
 	if err != nil {
 		p.Close()
 	}
+}
+
+// closeReasonMaxBytes 关闭帧 payload 上限 125 字节，减去 2 字节状态码后留给原因文本
+const closeReasonMaxBytes = 123
+
+// truncateCloseReason 按 UTF-8 边界截断关闭原因。
+// 原因超长会让整个关闭帧写失败，客户端就只能看到 1006（连接异常中断）而拿不到拒绝原因，
+// 进而把服务端的明确拒绝当成网络抖动去自动重连。
+func truncateCloseReason(msg string) string {
+	if len(msg) <= closeReasonMaxBytes {
+		return msg
+	}
+	truncated := msg[:closeReasonMaxBytes]
+	for len(truncated) > 0 && !utf8.ValidString(truncated) {
+		truncated = truncated[:len(truncated)-1]
+	}
+	return truncated
 }
 
 func (p *PlayerConnector) KickOthers() {

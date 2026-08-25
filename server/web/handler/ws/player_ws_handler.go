@@ -9,6 +9,10 @@ import (
 	"time"
 )
 
+// closeFrameGrace 发送关闭帧后等待的时间：给客户端读到关闭帧的机会，
+// 否则直接 Close 可能让客户端只看到 1006（连接异常中断）而拿不到拒绝原因
+const closeFrameGrace = 500 * time.Millisecond
+
 func (g *HandlerGroup) PlayerWebSocketHandler(c *gin.Context) {
 	// 被踢 IP 拒绝名单检查（问题1 第二层拦截，覆盖"先拿票后被踢"的窗口）
 	if service.DenyService.IsDenied(c.ClientIP()) {
@@ -30,49 +34,55 @@ func (g *HandlerGroup) PlayerWebSocketHandler(c *gin.Context) {
 	logger.Zap.Infof("玩家连接 ticket=%s IP=%s", c.Param("ticket"), player.IP)
 	// 连接Streamer
 	err = service.SdpService.ConnectStreamer(player, c.Param("ticket"))
-	if err == nil {
-		player.SendConfig()
-		for {
-			// 接收消息
-			_, msgStr, err := conn.ReadMessage()
-			if err != nil {
+	if err != nil {
+		// 连接失败：记录原因，并回一个带语义的关闭帧再断开。
+		// 此前是静默 sleep 3s 后裸关闭连接，客户端只看到 1006（无关闭帧），
+		// 一律当成网络异常自动重连 → 重新 ticketSelect → 换一台实例重复拉起。
+		code, reason := service.PlayerCloseCode(err)
+		logger.Zap.Warnf("玩家连接失败 ticket=%s IP=%s 关闭码=%d 原因=%s",
+			c.Param("ticket"), player.IP, code, reason)
+		player.SendCloseMsg(code, reason)
+		time.Sleep(closeFrameGrace) // 让关闭帧先于 TCP 断开抵达客户端
+		player.Close()
+		return
+	}
+	player.SendConfig()
+	for {
+		// 接收消息
+		_, msgStr, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+		msg := util.JsonStrToMapData(msgStr)
+		// 处理不同消息类型
+		msgType := msg["type"].(string)
+		if msgType == "ping" {
+			player.SendPong(msg)
+		} else if msgType == "pong" {
+			logger.Zap.Debug(msg)
+		} else if msgType == "listStreamers" {
+			player.ListStreamers()
+		} else if msgType == "offer" { // for old streamer
+			player.Offer(msg)
+			if err := service.SdpService.OnPlayerPaired(player); err != nil {
 				break
 			}
-			msg := util.JsonStrToMapData(msgStr)
-			// 处理不同消息类型
-			msgType := msg["type"].(string)
-			if msgType == "ping" {
-				player.SendPong(msg)
-			} else if msgType == "pong" {
-				logger.Zap.Debug(msg)
-			} else if msgType == "listStreamers" {
-				player.ListStreamers()
-			} else if msgType == "offer" { // for old streamer
-				player.Offer(msg)
-				if err := service.SdpService.OnPlayerPaired(player); err != nil {
-					break
-				}
-			} else if msgType == "subscribe" { // for new streamer
-				player.Subscribe()
-				if err := service.SdpService.OnPlayerPaired(player); err != nil {
-					break
-				}
-			} else if msgType == "answer" { // for new streamer
-				player.ForwardMessage(msg)
-			} else if msgType == "iceCandidate" {
-				player.ForwardMessage(msg)
-			} else if msgType == "stats" {
-				//todo
-			} else if msgType == "kick" {
-				player.KickOthers()
-			} else {
-				player.SendCloseMsg(1008, "不支持的消息类型")
+		} else if msgType == "subscribe" { // for new streamer
+			player.Subscribe()
+			if err := service.SdpService.OnPlayerPaired(player); err != nil {
+				break
 			}
+		} else if msgType == "answer" { // for new streamer
+			player.ForwardMessage(msg)
+		} else if msgType == "iceCandidate" {
+			player.ForwardMessage(msg)
+		} else if msgType == "stats" {
+			//todo
+		} else if msgType == "kick" {
+			player.KickOthers()
+		} else {
+			player.SendCloseMsg(1008, "不支持的消息类型")
 		}
-		service.SdpService.OnPlayerDisConnect(player)
-	} else {
-		// 无法连接Streamer
-		time.Sleep(3 * time.Second)
-		player.Close()
 	}
+	service.SdpService.OnPlayerDisConnect(player)
 }

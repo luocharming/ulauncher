@@ -328,23 +328,74 @@ func TestAllocOldClientDefaultsShared(t *testing.T) {
 	}
 }
 
-// TestAllocSidDirectRespectsWhitelist SID 直选不能绕过白名单准入。
-func TestAllocSidDirectRespectsWhitelist(t *testing.T) {
+// TestAllocSidDesignatedBypassesPolicy 指名直选（管理端实例列表点实例名跳转 player.html?sid=）
+// 不参与需求 5.1/5.2：白名单未命中、独占实例已被占用都照常出票。
+func TestAllocSidDesignatedBypassesPolicy(t *testing.T) {
 	setupAlloc(t, "alloc_sid_direct")
+	// 独占实例 + 配了白名单 + 已有 1 个连接：策略分配下这三项各自都会拒绝
 	mustCreate(t, &model.ServerInstance{
 		SID: "target", CID: 1, ClientID: 1, Name: "target",
-		InstanceType: 1, StateCode: 1, Whitelist: model.StringSlice{"10.1.2.3"},
+		InstanceType: 1, StateCode: 1, PlayerCount: 1,
+		Whitelist: model.StringSlice{"10.1.2.3"},
+	})
+
+	ticket, err := TicketService.selectInstance(
+		request.SelectorCond{Shared: boolPtr(false), ClientIP: "10.9.9.9", SID: "target"},
+		response.InstanceTicket{})
+	if err != nil {
+		t.Fatalf("SID 指名直选应无视白名单与容量直接出票: %v", err)
+	}
+	if ticket.SID != "target" || ticket.Ticket == "" {
+		t.Fatalf("应签发 target 的 ticket，实际 SID=%s ticket=%q", ticket.SID, ticket.Ticket)
+	}
+	// 同一实例可重复点名（预留计数不构成拦截）
+	if _, err := TicketService.selectInstance(
+		request.SelectorCond{Shared: boolPtr(false), ClientIP: "10.9.9.8", SID: "target"},
+		response.InstanceTicket{}); err != nil {
+		t.Fatalf("已有未消费预留时 SID 指名直选仍应出票: %v", err)
+	}
+}
+
+// TestAllocNameDesignatedBypassesPolicy 按实例名点名（player.html?name=）同样不走分配策略：
+// 类型池、白名单、容量都不参与。
+func TestAllocNameDesignatedBypassesPolicy(t *testing.T) {
+	setupAlloc(t, "alloc_name_direct")
+	mustCreate(t, &model.ServerInstance{
+		SID: "other", CID: 1, ClientID: 1, Name: "other",
+		InstanceType: 0, StateCode: 1, MaxPlayerCount: -1,
+	})
+	// 独占且已占用且白名单不含请求 IP：三重拒绝条件，点名后仍应出票
+	mustCreate(t, &model.ServerInstance{
+		SID: "named", CID: 2, ClientID: 1, Name: "named",
+		InstanceType: 1, StateCode: 1, PlayerCount: 1,
+		Whitelist: model.StringSlice{"10.1.2.3"},
+	})
+
+	// 请求类型为共享（默认），点名的却是独占实例：类型池不再拦截
+	ticket, err := TicketService.selectInstance(
+		request.SelectorCond{Shared: boolPtr(true), ClientIP: "10.9.9.9", Name: "named"},
+		response.InstanceTicket{})
+	if err != nil {
+		t.Fatalf("name 指名直选应无视类型池/白名单/容量直接出票: %v", err)
+	}
+	if ticket.SID != "named" {
+		t.Fatalf("应分配点名的 named，实际 %s", ticket.SID)
+	}
+}
+
+// TestAllocNameDesignatedNotReady 指名直选仍保留 ready 过滤：
+// 未启动且未开启自动启停的实例依旧不可分配。
+func TestAllocNameDesignatedNotReady(t *testing.T) {
+	setupAlloc(t, "alloc_name_not_ready")
+	mustCreate(t, &model.ServerInstance{
+		SID: "stopped", CID: 1, ClientID: 1, Name: "stopped",
+		InstanceType: 0, StateCode: 0, AutoControl: false, MaxPlayerCount: -1,
 	})
 
 	if _, err := TicketService.selectInstance(
-		request.SelectorCond{Shared: boolPtr(false), ClientIP: "10.9.9.9", SID: "target"},
+		request.SelectorCond{Shared: boolPtr(true), ClientIP: "10.1.2.3", Name: "stopped"},
 		response.InstanceTicket{}); err == nil {
-		t.Fatal("SID 直选不应绕过白名单")
-	}
-	if _, err := TicketService.selectInstance(
-		request.SelectorCond{Shared: boolPtr(false), ClientIP: "10.1.2.3", SID: "target"},
-		response.InstanceTicket{}); err != nil {
-		t.Fatalf("SID 直选白名单命中应成功: %v", err)
+		t.Fatal("未启动且未开启自动启停的实例即便点名也不应出票")
 	}
 }
 

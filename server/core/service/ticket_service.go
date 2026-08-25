@@ -27,6 +27,7 @@ type ticketReservation struct {
 	ip       string
 	expireAt time.Time
 	consumed bool
+	direct   bool // 指名直选（请求显式指定 sid/name）签发：不受容量判据约束，配对兜底同样放行
 }
 
 type ticketService struct {
@@ -75,15 +76,58 @@ func (s *ticketService) Reserve(sid, ip string, shared bool) (string, error) {
 			return "", errors.New("实例已被独占占用")
 		}
 	}
+	return s.issueLocked(sid, ip, false), nil
+}
+
+// ReserveDirect 指名直选（请求显式指定 sid/name）的预留：不做任何容量判据，必定成功。
+// 仍登记预留，配对时 Consume 才能通过；预留计数照常增减，保证与策略分配共用同一套账。
+func (s *ticketService) ReserveDirect(sid, ip string) string {
+	s.resMu.Lock()
+	defer s.resMu.Unlock()
+	s.sweepLocked(time.Now())
+	return s.issueLocked(sid, ip, true)
+}
+
+// issueLocked 生成 ticket 并登记预留，调用方需已持有 resMu。
+func (s *ticketService) issueLocked(sid, ip string, direct bool) string {
 	ticket, _ := uuid.NewUUID()
 	s.reservations[ticket.String()] = &ticketReservation{
 		sid:      sid,
 		ip:       ip,
 		expireAt: time.Now().Add(ticketExpire),
+		direct:   direct,
 	}
 	s.sidReserved[sid]++
 	s.cache.SetWithExpire(ticket.String(), sid, ticketExpire)
-	return ticket.String(), nil
+	return ticket.String()
+}
+
+// Renew 为等待中的玩家续期自己的预留（实例自动启动期间保活），成功返回 true；
+// 返回 false 表示该预留已过期/已消费/不属于该实例，调用方需要重新预留。
+//
+// 存在的意义：实例冷启动通常 2~4s 就完成，此时玩家自己的预留仍在 10s TTL 内。
+// 若改用 Reserve 重新预留，sidReserved 里"玩家自己的那一份"会被算成占用者，
+// 独占实例必然返回「实例已被独占占用」——玩家被自己的预留挡在门外。
+func (s *ticketService) Renew(ticket, sid string) bool {
+	s.resMu.Lock()
+	defer s.resMu.Unlock()
+	s.sweepLocked(time.Now())
+	r, ok := s.reservations[ticket]
+	if !ok || r.consumed || r.sid != sid {
+		return false
+	}
+	r.expireAt = time.Now().Add(ticketExpire)
+	s.cache.SetWithExpire(ticket, sid, ticketExpire)
+	return true
+}
+
+// IsDirectTicket 判断 ticket 是否由指名直选签发（配对兜底与自动启动后重新预留据此放行）。
+// 预留过期后返回 false，此时 ticket 本身也已失效，配对会在 Consume 处被拒。
+func (s *ticketService) IsDirectTicket(ticket string) bool {
+	s.resMu.Lock()
+	defer s.resMu.Unlock()
+	r, ok := s.reservations[ticket]
+	return ok && r.direct
 }
 
 // Consume 配对时消费预留：校验存在/未过期/未消费/归属 → 扣减并删除 ticket 缓存（同 ticket 不可复用）。
@@ -110,13 +154,10 @@ func (s *ticketService) GetTicketById(sid string, clientIP string) (string, erro
 	if err != nil {
 		return "", err
 	}
-	// 与 TicketSelect2 的 SID 直选一致：白名单准入优先于容量校验，避免绕过白名单直接取票
-	if !whitelistAllows(&instance, clientIP) {
-		logger.Zap.Warnf("getTicketById 被白名单拒绝 SID=%s IP=%s 白名单=%v", sid, clientIP, instance.Whitelist)
-		return "", errors.New("当前IP不在该实例白名单内")
-	}
-	// 与 TicketSelect2 同一预留机制，容量校验一致
-	return s.Reserve(sid, clientIP, instance.InstanceType == 0)
+	// 与 TicketSelect2 的指名直选一致：显式点名某个实例即不参与分配策略，
+	// 不做白名单准入、不做独占/共享容量判据，直接签发 ticket
+	logger.Zap.Infof("getTicketById 指名直选 SID=%s 名称=%s IP=%s（不走白名单与容量判据）", sid, instance.Name, clientIP)
+	return s.ReserveDirect(sid, clientIP), nil
 }
 
 func (s *ticketService) GetSidByTicket(ticket string) (string, error) {
@@ -321,26 +362,17 @@ func (s *ticketService) selectInstance(selectCond request.SelectorCond, ticket r
 	if len(readyInstances) == 0 {
 		return ticket, errors.New("实例未启动且未开启自动启停")
 	}
-	// 6) SID 直选：跳过选择策略，但仍做白名单准入（player.html?sid= 直连不能绕过白名单）与容量校验、预留。
-	//    容量判据按实例自身类型（与 GetTicketById 一致）：独占实例恒按 1，请求 shared 字段不能放宽容量。
+	// 6) 指名直选：请求显式指定 sid 或 name（管理端实例列表点实例名跳转的 player.html?sid= 即走这里）。
+	//    点名要某个实例不属于"分配"，不参与需求 5.1/5.2：不做类型池过滤、不做白名单准入、不做容量判据。
+	isDesignated := selectCond.SID != "" || selectCond.Name != ""
 	if selectCond.SID != "" {
 		for _, instance := range findInstances {
 			if instance.SID == selectCond.SID {
-				if !whitelistAllows(instance, selectCond.ClientIP) {
-					logger.Zap.Warnf("【分配】SID直选被白名单拒绝 SID=%s 名称=%s 白名单=%v clientIP=%s 逐条匹配=%s",
-						instance.SID, instance.Name, instance.Whitelist, selectCond.ClientIP,
-						ruleMatchBrief(instance.Whitelist, selectCond.ClientIP))
-					return ticket, errors.New("当前IP不在该实例白名单内")
-				}
-				ticketId, err := s.Reserve(instance.SID, selectCond.ClientIP, instance.InstanceType == 0)
-				if err != nil {
-					logger.Zap.Warnf("【分配】SID直选预留失败 SID=%s 名称=%s err=%v", instance.SID, instance.Name, err)
-					return ticket, err
-				}
+				ticketId := s.ReserveDirect(instance.SID, selectCond.ClientIP)
 				ticket.SetInstanceInfo(instance)
 				ticket.Ticket = ticketId
-				logger.Zap.Infof("【分配】SID直选命中 SID=%s 名称=%s 类型=%d 白名单=%v，已签发ticket",
-					instance.SID, instance.Name, instance.InstanceType, instance.Whitelist)
+				logger.Zap.Infof("【分配】SID指名直选命中 SID=%s 名称=%s 类型=%d 白名单=%v 玩家数=%d，已签发ticket（不走白名单与容量判据）",
+					instance.SID, instance.Name, instance.InstanceType, instance.Whitelist, instance.PlayerCount)
 				return ticket, nil
 			}
 		}
@@ -348,25 +380,32 @@ func (s *ticketService) selectInstance(selectCond request.SelectorCond, ticket r
 	}
 	// 7) 类型池过滤（nil 与 true 都进共享池；false 进独占池；池间不交叉回退）
 	//    + 白名单准入过滤：配置了白名单但当前 IP 未命中的实例，两段都不参与（严格准入）
+	//    指名直选（name）跳过这两道过滤，候选即全部 ready 实例。
 	var candidates []*model.ServerInstance
 	deniedByWhitelist := 0
-	for _, instance := range readyInstances {
-		if isSharedReq && instance.InstanceType != 0 {
-			logger.Zap.Infof("【分配】类型池剔除 SID=%s 名称=%s 实例类型=独占 请求类型=%s", instance.SID, instance.Name, typeLabel)
-			continue
+	if isDesignated {
+		candidates = readyInstances
+		logger.Zap.Infof("【分配】name指名直选 name=%q 命中 %d 个ready实例（不走类型池、白名单与容量判据）",
+			selectCond.Name, len(candidates))
+	} else {
+		for _, instance := range readyInstances {
+			if isSharedReq && instance.InstanceType != 0 {
+				logger.Zap.Infof("【分配】类型池剔除 SID=%s 名称=%s 实例类型=独占 请求类型=%s", instance.SID, instance.Name, typeLabel)
+				continue
+			}
+			if !isSharedReq && instance.InstanceType != 1 {
+				logger.Zap.Infof("【分配】类型池剔除 SID=%s 名称=%s 实例类型=共享 请求类型=%s", instance.SID, instance.Name, typeLabel)
+				continue
+			}
+			if !whitelistAllows(instance, selectCond.ClientIP) {
+				deniedByWhitelist++
+				logger.Zap.Infof("【分配】白名单准入拒绝 SID=%s 名称=%s 白名单=%v clientIP=%s 逐条匹配=%s（该实例不参与本次分配）",
+					instance.SID, instance.Name, instance.Whitelist, selectCond.ClientIP,
+					ruleMatchBrief(instance.Whitelist, selectCond.ClientIP))
+				continue
+			}
+			candidates = append(candidates, instance)
 		}
-		if !isSharedReq && instance.InstanceType != 1 {
-			logger.Zap.Infof("【分配】类型池剔除 SID=%s 名称=%s 实例类型=共享 请求类型=%s", instance.SID, instance.Name, typeLabel)
-			continue
-		}
-		if !whitelistAllows(instance, selectCond.ClientIP) {
-			deniedByWhitelist++
-			logger.Zap.Infof("【分配】白名单准入拒绝 SID=%s 名称=%s 白名单=%v clientIP=%s 逐条匹配=%s（该实例不参与本次分配）",
-				instance.SID, instance.Name, instance.Whitelist, selectCond.ClientIP,
-				ruleMatchBrief(instance.Whitelist, selectCond.ClientIP))
-			continue
-		}
-		candidates = append(candidates, instance)
 	}
 	if len(candidates) == 0 {
 		if deniedByWhitelist > 0 {
@@ -402,7 +441,7 @@ func (s *ticketService) selectInstance(selectCond request.SelectorCond, ticket r
 	}
 	// 9) 分配：携带 sceneId 走场景四级优先级；否则严格按顺序（需求 5.1/5.2 两段式）
 	if selectCond.SceneId != "" {
-		return s.selectWithScene(candidates, selectCond, isSharedReq, ticket)
+		return s.selectWithScene(candidates, selectCond, isSharedReq, isDesignated, ticket)
 	}
 	for _, pass := range []bool{true, false} { // true=白名单命中段, false=无白名单段
 		passName := "无白名单段"
@@ -414,7 +453,7 @@ func (s *ticketService) selectInstance(selectCond request.SelectorCond, ticket r
 			if pass != whitelistHit(instance, selectCond.ClientIP) {
 				continue
 			}
-			ticketId, err := s.Reserve(instance.SID, selectCond.ClientIP, isSharedReq)
+			ticketId, err := s.reserveFor(instance.SID, selectCond.ClientIP, isSharedReq, isDesignated)
 			if err != nil {
 				logger.Zap.Infof("【分配】[%s] SID=%s 名称=%s 预留失败: %v（继续下一个）", passName, instance.SID, instance.Name, err)
 				continue
@@ -435,9 +474,19 @@ func (s *ticketService) selectInstance(selectCond request.SelectorCond, ticket r
 	return ticket, errors.New("独占实例已全部被占用")
 }
 
+// reserveFor 按是否指名直选选择预留方式：指名直选（sid/name）不做容量判据，必定成功；
+// 其余走 Reserve 的原子容量校验。
+func (s *ticketService) reserveFor(sid, ip string, isSharedReq, designated bool) (string, error) {
+	if designated {
+		return s.ReserveDirect(sid, ip), nil
+	}
+	return s.Reserve(sid, ip, isSharedReq)
+}
+
 // selectWithScene 携带 sceneId 时的分配：保留现有场景四级优先级（级内 c_id 升序），
 // 每级内叠加两段式白名单遍历（白名单命中段 → 无白名单段），容量由 Reserve 原子校验。
-func (s *ticketService) selectWithScene(candidates []*model.ServerInstance, cond request.SelectorCond, isSharedReq bool, ticket response.InstanceTicket) (response.InstanceTicket, error) {
+// designated=true（请求带 name 点名实例）时不做容量判据，仅保留场景优先级本身。
+func (s *ticketService) selectWithScene(candidates []*model.ServerInstance, cond request.SelectorCond, isSharedReq, designated bool, ticket response.InstanceTicket) (response.InstanceTicket, error) {
 	sceneId := cond.SceneId
 	reqType := "共享"
 	if !isSharedReq {
@@ -460,7 +509,7 @@ func (s *ticketService) selectWithScene(candidates []*model.ServerInstance, cond
 				skipped++
 				continue
 			}
-			ticketId, err := s.Reserve(instance.SID, cond.ClientIP, isSharedReq)
+			ticketId, err := s.reserveFor(instance.SID, cond.ClientIP, isSharedReq, designated)
 			if err != nil {
 				logger.Zap.Infof("【分配-场景】[%s][优先级1] 预留失败 SID=%s 名称=%s err=%v（继续下一个）", passName, instance.SID, instance.Name, err)
 				continue
@@ -485,7 +534,7 @@ func (s *ticketService) selectWithScene(candidates []*model.ServerInstance, cond
 				skipped++
 				continue
 			}
-			ticketId, err := s.Reserve(instance.SID, cond.ClientIP, isSharedReq)
+			ticketId, err := s.reserveFor(instance.SID, cond.ClientIP, isSharedReq, designated)
 			if err != nil {
 				logger.Zap.Infof("【分配-场景】[%s][优先级2] 预留失败 SID=%s 名称=%s err=%v（继续下一个）", passName, instance.SID, instance.Name, err)
 				continue
@@ -511,7 +560,7 @@ func (s *ticketService) selectWithScene(candidates []*model.ServerInstance, cond
 				skipped++
 				continue
 			}
-			ticketId, err := s.Reserve(instance.SID, cond.ClientIP, isSharedReq)
+			ticketId, err := s.reserveFor(instance.SID, cond.ClientIP, isSharedReq, designated)
 			if err != nil {
 				logger.Zap.Infof("【分配-场景】[%s][优先级3] 预留失败 SID=%s 名称=%s err=%v（继续下一个）", passName, instance.SID, instance.Name, err)
 				continue
@@ -541,7 +590,7 @@ func (s *ticketService) selectWithScene(candidates []*model.ServerInstance, cond
 				skipped++
 				continue
 			}
-			ticketId, err := s.Reserve(instance.SID, cond.ClientIP, isSharedReq)
+			ticketId, err := s.reserveFor(instance.SID, cond.ClientIP, isSharedReq, designated)
 			if err != nil {
 				logger.Zap.Infof("【分配-场景】[%s][优先级4] 预留失败 SID=%s 名称=%s err=%v（继续下一个）", passName, instance.SID, instance.Name, err)
 				continue

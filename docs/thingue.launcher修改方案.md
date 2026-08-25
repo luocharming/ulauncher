@@ -583,7 +583,7 @@ func (d *denyService) IsDenied(ip string) bool // 惰性清理过期条目后判
 |---|---|---|
 | thinguelib 事件 | `EventType.KICKED = 'kicked'` | 参数 `{code, reason}`；`Core.on('kicked', cb)` 订阅 |
 | 服务端 HTTP 码 | `code=403`（`DENIED`） | ticketSelect 拒绝名单拦截 |
-| WS 关闭码 | `4000 "kicked"`（现状沿用）/ `4001` | 4000=被踢；4001=ticket 无效或过期 |
+| WS 关闭码 | `4000 "kicked"`（现状沿用）/ `4001` / `4002` | 4000=被踢；4001=ticket 无效或过期；4002=实例不可用（未启动/启动超时/已被独占占用）。常量定义见 `server/core/service/sdp_service.go` 的 `ClosePlayer*`；4000~4099 一律由 thinguelib 视为"服务端明确拒绝"并停止自动重连 |
 | 拒绝名单配置 | `localServer.kickDenySeconds` | config.yaml，默认 60 |
 
 ---
