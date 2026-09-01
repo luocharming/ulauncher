@@ -143,7 +143,11 @@ func (g *InstanceGroup) DownloadLogs(c *gin.Context) {
 
 func (g *InstanceGroup) TicketSelect(c *gin.Context) {
 	var selectCond request.SelectorCond
-	err := c.ShouldBindJSON(&selectCond)
+	if err := c.ShouldBindJSON(&selectCond); err != nil {
+		// 绑定失败直接拒绝：避免按零值（共享请求+无任何过滤）继续走分配逻辑出票
+		response.FailWithMessage(fmt.Sprintf("请求参数解析失败: %v", err), c)
+		return
+	}
 	selectCond.ClientIP = c.ClientIP() // 服务端采集，覆盖一切客户端输入
 	logger.Zap.Infof("ticketSelect 收到请求 ClientIP=%s RemoteAddr=%s X-Forwarded-For=%q X-Real-IP=%q 参数=%+v",
 		selectCond.ClientIP, c.Request.RemoteAddr,

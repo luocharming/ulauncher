@@ -115,8 +115,8 @@ func (m *sdpService) ConnectStreamer(playerConnector *provider.PlayerConnector, 
 	if err != nil {
 		return &connectError{Code: ClosePlayerTicket, Reason: "ticket无效或过期"}
 	}
-	// 指名直选签发的 ticket（player.html?sid=/?name=、getTicketById）不参与分配策略，
-	// 记录下来供自动启动后重新预留与配对兜底放行
+	// 共享实例指名直选签发的 ticket（player.html?sid=/?name=、getTicketById 指向共享实例）不参与分配策略，
+	// 记录下来供自动启动超时后重新预留放行；独占实例的指名直选已走 Reserve 容量判据，此标记为 false
 	playerConnector.Direct = TicketService.IsDirectTicket(ticket)
 	// ticket 发出后被踢的窗口：upgrade 之后再次检查拒绝名单（问题1 第二层拦截）
 	if DenyService.IsDenied(playerConnector.IP) {
@@ -174,7 +174,7 @@ func (m *sdpService) waitAutoStart(playerConnector *provider.PlayerConnector, ti
 		// 预留全程保活，直接沿用原 ticket，配对时正常 Consume
 		playerConnector.Ticket = ticket
 	} else if playerConnector.Direct {
-		// 等待超过 TTL 且预留已被 sweep：指名直选不做容量判据，重新预留必定成功
+		// 等待超过 TTL 且预留已被 sweep：共享实例指名直选不做容量判据，重新预留必定成功
 		playerConnector.Ticket = TicketService.ReserveDirect(sid, playerConnector.IP)
 	} else if ticketId, reserveErr := TicketService.Reserve(sid, playerConnector.IP, instance.InstanceType == 0); reserveErr == nil {
 		// 原预留已失效，此时按实例类型重新判容量（独占恒按 1）不会再撞上自己
@@ -221,10 +221,11 @@ func (m *sdpService) OnPlayerPaired(player *provider.PlayerConnector) error {
 		player.SendCloseMsg(ClosePlayerKicked, "kicked")
 		return errors.New("已被断开")
 	}
-	// 独占容量防御性兜底（预留已防，双保险）：独占实例已有玩家则拒绝。
-	// 指名直选（sid/name 点名实例，含管理端实例列表点实例名预览）不受此约束。
+	// 独占容量防御性兜底（预留已防，双保险）：独占实例已有玩家则拒绝，指名直选不再放行。
+	// 覆盖 Consume 与 UpdatePlayers 落库之间的窗口：预留已消费但玩家数尚未落库时，
+	// 后续 Reserve 可能误判为空闲，这里以 streamer 实时的玩家列表为最终判据。
 	instance := InstanceService.GetInstanceBySid(streamer.SID)
-	if !player.Direct && instance.InstanceType == 1 && len(streamer.Players()) >= 1 {
+	if instance.InstanceType == 1 && len(streamer.Players()) >= 1 {
 		player.SendCloseMsg(ClosePlayerUnavailable, "实例已被独占占用")
 		return errors.New("实例已被独占占用")
 	}

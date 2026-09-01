@@ -328,58 +328,116 @@ func TestAllocOldClientDefaultsShared(t *testing.T) {
 	}
 }
 
-// TestAllocSidDesignatedBypassesPolicy 指名直选（管理端实例列表点实例名跳转 player.html?sid=）
-// 不参与需求 5.1/5.2：白名单未命中、独占实例已被占用都照常出票。
-func TestAllocSidDesignatedBypassesPolicy(t *testing.T) {
-	setupAlloc(t, "alloc_sid_direct")
-	// 独占实例 + 配了白名单 + 已有 1 个连接：策略分配下这三项各自都会拒绝
+// TestAllocSidDesignatedExclusiveRejectsWhenOccupied 需求第 3 条（独占实例连接数固定为 1）：
+// SID 指名直选（管理端实例列表点实例名跳转 player.html?sid=）同样受独占容量判据约束，
+// 已占用的独占实例拒绝出票，不能把第二个玩家挤进去。
+func TestAllocSidDesignatedExclusiveRejectsWhenOccupied(t *testing.T) {
+	setupAlloc(t, "alloc_sid_excl_occupied")
 	mustCreate(t, &model.ServerInstance{
 		SID: "target", CID: 1, ClientID: 1, Name: "target",
 		InstanceType: 1, StateCode: 1, PlayerCount: 1,
 		Whitelist: model.StringSlice{"10.1.2.3"},
 	})
 
-	ticket, err := TicketService.selectInstance(
+	if _, err := TicketService.selectInstance(
 		request.SelectorCond{Shared: boolPtr(false), ClientIP: "10.9.9.9", SID: "target"},
+		response.InstanceTicket{}); err == nil {
+		t.Fatal("已占用的独占实例 SID 指名直选应被拒绝")
+	}
+}
+
+// TestAllocSidDesignatedExclusiveFreeSucceeds SID 直选仍旁路类型池与白名单准入（管理端预览），
+// 空闲独占实例可出票；但未消费的预留计入独占容量判据，第二次直选应被拒绝。
+func TestAllocSidDesignatedExclusiveFreeSucceeds(t *testing.T) {
+	setupAlloc(t, "alloc_sid_excl_free")
+	mustCreate(t, &model.ServerInstance{
+		SID: "target", CID: 1, ClientID: 1, Name: "target",
+		InstanceType: 1, StateCode: 1,
+		Whitelist: model.StringSlice{"10.1.2.3"},
+	})
+
+	// Shared 传 nil 模拟管理端播放页 player.html?sid= 不带 shared 参数
+	ticket, err := TicketService.selectInstance(
+		request.SelectorCond{Shared: nil, ClientIP: "10.9.9.9", SID: "target"},
 		response.InstanceTicket{})
 	if err != nil {
-		t.Fatalf("SID 指名直选应无视白名单与容量直接出票: %v", err)
+		t.Fatalf("空闲独占实例 SID 直选应出票（白名单准入旁路保留）: %v", err)
 	}
 	if ticket.SID != "target" || ticket.Ticket == "" {
 		t.Fatalf("应签发 target 的 ticket，实际 SID=%s ticket=%q", ticket.SID, ticket.Ticket)
 	}
-	// 同一实例可重复点名（预留计数不构成拦截）
+	// 第一个 ticket 未消费，预留计数计入独占判据：第二次直选应失败
 	if _, err := TicketService.selectInstance(
-		request.SelectorCond{Shared: boolPtr(false), ClientIP: "10.9.9.8", SID: "target"},
-		response.InstanceTicket{}); err != nil {
-		t.Fatalf("已有未消费预留时 SID 指名直选仍应出票: %v", err)
+		request.SelectorCond{Shared: nil, ClientIP: "10.9.9.8", SID: "target"},
+		response.InstanceTicket{}); err == nil {
+		t.Fatal("已有未消费预留时独占实例 SID 直选应被拒绝")
 	}
 }
 
-// TestAllocNameDesignatedBypassesPolicy 按实例名点名（player.html?name=）同样不走分配策略：
-// 类型池、白名单、容量都不参与。
-func TestAllocNameDesignatedBypassesPolicy(t *testing.T) {
+// TestAllocSidDesignatedSharedBypassCapacity 共享实例指名直选保持必成功：
+// 按策略已满的共享实例点名仍可出票（不受 MaxPlayerCount 限制）。
+func TestAllocSidDesignatedSharedBypassCapacity(t *testing.T) {
+	setupAlloc(t, "alloc_sid_shared")
+	mustCreate(t, &model.ServerInstance{
+		SID: "target", CID: 1, ClientID: 1, Name: "target",
+		InstanceType: 0, StateCode: 1, MaxPlayerCount: 1, PlayerCount: 1,
+	})
+
+	ticket, err := TicketService.selectInstance(
+		request.SelectorCond{Shared: boolPtr(true), ClientIP: "10.9.9.9", SID: "target"},
+		response.InstanceTicket{})
+	if err != nil {
+		t.Fatalf("共享实例 SID 直选应无视容量直接出票: %v", err)
+	}
+	if ticket.SID != "target" {
+		t.Fatalf("应签发 target 的 ticket，实际 %s", ticket.SID)
+	}
+}
+
+// TestAllocNameDesignatedPolicy name 指名直选（player.html?name=）仍旁路类型池与白名单准入，
+// 但需求第 3 条的独占容量判据在 reserveFor 内仍生效。
+func TestAllocNameDesignatedPolicy(t *testing.T) {
 	setupAlloc(t, "alloc_name_direct")
 	mustCreate(t, &model.ServerInstance{
-		SID: "other", CID: 1, ClientID: 1, Name: "other",
-		InstanceType: 0, StateCode: 1, MaxPlayerCount: -1,
+		SID: "shared-full", CID: 1, ClientID: 1, Name: "shared-full",
+		InstanceType: 0, StateCode: 1, MaxPlayerCount: 1, PlayerCount: 1,
 	})
-	// 独占且已占用且白名单不含请求 IP：三重拒绝条件，点名后仍应出票
 	mustCreate(t, &model.ServerInstance{
-		SID: "named", CID: 2, ClientID: 1, Name: "named",
+		SID: "named-excl-occupied", CID: 2, ClientID: 1, Name: "named-excl-occupied",
 		InstanceType: 1, StateCode: 1, PlayerCount: 1,
 		Whitelist: model.StringSlice{"10.1.2.3"},
 	})
+	mustCreate(t, &model.ServerInstance{
+		SID: "named-excl-free", CID: 3, ClientID: 1, Name: "named-excl-free",
+		InstanceType: 1, StateCode: 1,
+		Whitelist: model.StringSlice{"10.1.2.3"},
+	})
 
-	// 请求类型为共享（默认），点名的却是独占实例：类型池不再拦截
+	// 已占用的独占实例：请求类型为共享（类型池旁路）、白名单不含请求 IP（准入旁路），容量判据仍拒绝
+	if _, err := TicketService.selectInstance(
+		request.SelectorCond{Shared: boolPtr(true), ClientIP: "10.9.9.9", Name: "named-excl-occupied"},
+		response.InstanceTicket{}); err == nil {
+		t.Fatal("name 直选已占用的独占实例应被拒绝")
+	}
+	// 空闲独占实例：白名单不命中仍出票（准入旁路保留）
 	ticket, err := TicketService.selectInstance(
-		request.SelectorCond{Shared: boolPtr(true), ClientIP: "10.9.9.9", Name: "named"},
+		request.SelectorCond{Shared: boolPtr(true), ClientIP: "10.9.9.9", Name: "named-excl-free"},
 		response.InstanceTicket{})
 	if err != nil {
-		t.Fatalf("name 指名直选应无视类型池/白名单/容量直接出票: %v", err)
+		t.Fatalf("name 直选空闲独占实例应出票: %v", err)
 	}
-	if ticket.SID != "named" {
-		t.Fatalf("应分配点名的 named，实际 %s", ticket.SID)
+	if ticket.SID != "named-excl-free" {
+		t.Fatalf("应分配点名的 named-excl-free，实际 %s", ticket.SID)
+	}
+	// 共享实例：按策略已满仍直选成功
+	ticket2, err := TicketService.selectInstance(
+		request.SelectorCond{Shared: boolPtr(true), ClientIP: "10.9.9.9", Name: "shared-full"},
+		response.InstanceTicket{})
+	if err != nil {
+		t.Fatalf("name 直选共享实例应必成功: %v", err)
+	}
+	if ticket2.SID != "shared-full" {
+		t.Fatalf("应分配点名的 shared-full，实际 %s", ticket2.SID)
 	}
 }
 

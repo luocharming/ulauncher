@@ -18,7 +18,7 @@ type PlayerConnector struct {
 	UserData          map[string]string
 	IP                string // 服务端采集的客户端 IP（gin c.ClientIP）
 	Ticket            string // 配对时消费预留的 ticket（ConnectStreamer 成功时记录）
-	Direct            bool   // ticket 由指名直选（sid/name）签发：不受独占容量兜底约束
+	Direct            bool   // ticket 由共享实例的指名直选（sid/name）签发；独占容量兜底对所有 ticket 生效
 	Paired            bool   // 配对幂等标记（仅归属读循环协程读写）
 	heartbeatTicker   *time.Ticker
 }
